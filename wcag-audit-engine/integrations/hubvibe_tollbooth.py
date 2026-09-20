@@ -9,7 +9,7 @@ the 402 itself from a wallet and continue, with no human in the loop.
     from hubvibe_tollbooth import HubVibeTollbooth
 
     booth = HubVibeTollbooth.from_env()
-    result = booth.audit("https://example.com")     # pays $0.10 if needed
+    result = booth.audit("https://example.com")     # pays $0.15 if needed
     if not result["pass"]:
         ...
 
@@ -29,7 +29,7 @@ Pick ONE auth path:
                            payments per call. Fund it with USDC on Base.
 
 Optional:
-  HUBVIBE_BASE_URL         default https://hubvibe-831480473793.us-south1.run.app
+  HUBVIBE_BASE_URL         default https://hubvibe-io.com
   HUBVIBE_MAX_PRICE_USD    per-call ceiling, default 0.25
   HUBVIBE_BUDGET_USD       total this process may ever spend, default 5.00
 
@@ -51,13 +51,14 @@ configuration this must not make easy.
 
 from __future__ import annotations
 
+import inspect
 import os
 import threading
 from typing import Any, Optional
 
 import httpx
 
-DEFAULT_BASE_URL = "https://hubvibe-831480473793.us-south1.run.app"
+DEFAULT_BASE_URL = "https://hubvibe-io.com"
 
 # USDC on Base has 6 decimals. x402's max_amount policy works in atomic
 # units, so dollars have to be converted before it can be applied.
@@ -67,11 +68,11 @@ _USDC_DECIMALS = 6
 # to an LLM -- the authoritative price is always the one in the 402 challenge,
 # and that is what actually gets paid.
 PRICES_USD = {
-    "wcag": 0.03,
-    "seo": 0.03,
-    "security": 0.03,
-    "performance": 0.03,
-    "bundle": 0.10,
+    "wcag": 0.05,
+    "seo": 0.05,
+    "security": 0.05,
+    "performance": 0.05,
+    "bundle": 0.15,
 }
 
 
@@ -119,6 +120,11 @@ class HubVibeTollbooth:
         self._spent_usd = 0.0
         self._lock = threading.Lock()
         self._http_client = None
+        # The facilitator's settle response for the most recent paid call,
+        # decoded from the PAYMENT-RESPONSE header: transaction hash, network,
+        # payer. None until a call has been paid, and None again if the server
+        # sent no receipt. This is the only on-chain reference the payer gets.
+        self.last_settlement: Optional[dict] = None
 
         if wallet_key:
             self._http_client = self._build_x402_client(wallet_key, max_price_usd)
@@ -210,11 +216,46 @@ class HubVibeTollbooth:
         with self._lock:
             self._spent_usd = max(0.0, self._spent_usd - price_usd)
 
+    def _sign_402(self, response: httpx.Response, request_url: str):
+        """Turn a 402 into payment headers, across x402 client versions.
+
+        x402 2.21 added a REQUIRED third parameter, `request_url`, to
+        `handle_402_response`. 2.18 -- the version this repo pinned until
+        2026-09-04 (2.22 now) -- does not accept it. Calling with the wrong
+        arity raises TypeError *before* any signature exists, so the caller
+        sees "could not construct an x402 payment" with nothing on-chain to
+        inspect and no facilitator involved: the exact silent-bounce shape
+        that made revenue look like absent demand in #61.
+
+        The pin protects the service, but not the two places that matter most
+        here. `scripts/first-paid-call.sh` shells out to bare `python3`, which
+        resolves to whatever x402 the machine has rather than the pinned one --
+        and this module ships to agent authors who install x402 themselves.
+        Both must work on either version, so the arity is read off the
+        installed callable instead of assumed.
+
+        Introspection rather than `except TypeError`: a TypeError raised from
+        *inside* the library would otherwise be silently retried with different
+        arguments and reported as an arity problem.
+        """
+        handler = self._http_client.handle_402_response
+        args = [dict(response.headers), response.content]
+        try:
+            takes_url = "request_url" in inspect.signature(handler).parameters
+        except (TypeError, ValueError):
+            # A callable with no introspectable signature (a C function, some
+            # mocks). Fall back to the two-argument (<= 2.20) arity rather
+            # than guess.
+            takes_url = False
+        if takes_url:
+            args.append(request_url)
+        return handler(*args)
+
     @staticmethod
     def _challenge_price_usd(body: Any, fallback: float) -> float:
         """The price the 402 actually asked for, in USD.
 
-        The service quotes `"$0.03"`. Anything unparseable falls back to the
+        The service quotes `"$0.05"`. Anything unparseable falls back to the
         published rate for the route rather than to zero -- a price of zero
         would silently defeat both spending limits.
         """
@@ -257,8 +298,8 @@ class HubVibeTollbooth:
             price_usd = self._challenge_price_usd(self._safe_json(response), price_hint)
             self._reserve(price_usd)
             try:
-                pay_headers, _payload = self._http_client.handle_402_response(
-                    dict(response.headers), response.content
+                pay_headers, _payload = self._sign_402(
+                    response, f"{self.base_url}{path}"
                 )
             except Exception as exc:
                 # No signature was produced, so no money moved.
@@ -277,7 +318,34 @@ class HubVibeTollbooth:
                 raise HubVibeError(
                     f"Payment was rejected by HubVibe: {self._safe_json(retried)}"
                 )
+            self.last_settlement = self._read_receipt(retried)
             return self._unwrap(retried)
+
+    @staticmethod
+    def _read_receipt(response: httpx.Response) -> Optional[dict]:
+        """Decode the x402 settlement receipt off a paid response, or None.
+
+        Base64 JSON in PAYMENT-RESPONSE (v2) or X-PAYMENT-RESPONSE (v1). Read
+        by hand rather than through the x402 library so a receipt in a shape
+        a newer library rejects still reaches the caller: this is evidence
+        for a human to reconcile, not an input anything here acts on. Never
+        raises -- a malformed receipt must not turn a delivered, paid audit
+        into an exception.
+        """
+        header = response.headers.get("PAYMENT-RESPONSE") or response.headers.get(
+            "X-PAYMENT-RESPONSE"
+        )
+        if not header:
+            return None
+        try:
+            import base64
+            import json
+
+            padded = header + "=" * (-len(header) % 4)
+            decoded = json.loads(base64.b64decode(padded).decode("utf-8"))
+            return decoded if isinstance(decoded, dict) else None
+        except Exception:
+            return None
 
     @staticmethod
     def _safe_json(response: httpx.Response) -> Any:
@@ -355,7 +423,7 @@ def hubvibe_tools():
         standards before reporting it as done. Returns a dict with `pass`
         (bool, true only if every dimension passed) plus per-dimension
         `wcag`, `seo`, `security` and `performance` results, each with its
-        own `pass` and findings. Costs $0.10, paid automatically.
+        own `pass` and findings. Costs $0.15, paid automatically.
         """
         return shared_client().audit(url, "bundle")
 
@@ -363,7 +431,7 @@ def hubvibe_tools():
     def hubvibe_audit_accessibility(url: str) -> dict:
         """Run only the WCAG 2.1 A/AA accessibility audit (axe-core) against a
         live URL. Returns `pass` and a list of violations with rule id,
-        impact, and how many nodes are affected. Costs $0.03, paid
+        impact, and how many nodes are affected. Costs $0.05, paid
         automatically. Use the full site audit instead if you also care about
         SEO, security headers, or performance.
         """
@@ -373,7 +441,7 @@ def hubvibe_tools():
     def hubvibe_audit_html(html: str) -> dict:
         """Check raw HTML for accessibility violations before it is deployed
         anywhere. Takes the HTML source as a string rather than a URL.
-        Returns `pass` and a list of violations. Costs $0.03, paid
+        Returns `pass` and a list of violations. Costs $0.05, paid
         automatically.
         """
         return shared_client().audit_html(html, "wcag")

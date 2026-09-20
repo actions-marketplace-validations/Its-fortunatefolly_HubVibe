@@ -49,7 +49,7 @@ _METER_EVENT_NAME = os.environ.get("STRIPE_METER_EVENT_NAME", "wcag_audit_call")
 _METER_AGGREGATION = (os.environ.get("STRIPE_METER_AGGREGATION") or "count").strip().lower()
 
 # What one unit on the metered Price is worth, in cents. The live Price
-# (price_1U2Hqm...) is $0.01 per unit, so a $0.03 audit is 3 units and a $0.10
+# (price_1U2Hqm...) is $0.01 per unit, so a $0.05 audit is 5 units and a $0.15
 # bundle is 10. See record_usage: the meter counts cents, not calls, and this
 # is the one number that ties the two together. If the Price is ever changed,
 # change it here in the same breath -- a mismatch here is a silent, uniform
@@ -97,17 +97,18 @@ SAAS_MONTHLY_QUOTA = int(os.environ.get("SAAS_MONTHLY_QUOTA", "1500"))
 # Per-plan monthly call caps.
 #
 # One global 1,500 cap for every subscriber was a plan-breaking bug. Agency
-# is sold as "50 sites, audited daily": 50 bundle calls a day is 1,550 in a
-# 31-day month, so the customer paying $249 got cut off before month end --
-# and if they audited per-dimension rather than bundling (4 calls per site
-# per day) they hit the wall around day 7 and started getting 402s on a plan
-# they had already paid for. Pro and Agency also shared the same ceiling, so
-# tripling the price bought no extra capacity at all.
+# was sold as "50 sites, audited daily": 50 bundle calls a day is 1,550 in a
+# 31-day month, so that customer got cut off before month end -- and if they
+# audited per-dimension rather than bundling (4 calls per site per day) they
+# hit the wall around day 7 and started getting 402s on a plan they had
+# already paid for. Pro and Agency also shared the same ceiling, so tripling
+# the price bought no extra capacity at all.
 #
 # These are sized to the promise with real headroom, because the cap exists
 # to stop runaway abuse, not to meter value: marginal cost is ~$0.00007 per
-# audit, so even 10,000 audits is about $0.70 against $249 of revenue.
-# Under-sizing this costs a customer; over-sizing it costs pennies.
+# audit, so even 10,000 audits is about $0.70 against a plan's revenue.
+# Under-sizing this costs a customer; over-sizing it costs pennies. Kept
+# for keys issued before the plans were retired (2026-09-06).
 PLAN_MONTHLY_QUOTA = {
     "pro": int(os.environ.get("QUOTA_PRO", "2000")),  # 5 sites x 4 checks x 31d = 620
     "agency": int(os.environ.get("QUOTA_AGENCY", "10000")),  # 50 x 4 x 31 = 6,200
@@ -120,7 +121,7 @@ def monthly_quota_for(plan: Optional[str]) -> int:
 
 # Human-facing plans, priced per SITE MONITORED rather than per scan.
 # Denominating a plan in scans invites the obvious arithmetic against the
-# $0.03 machine rate; the old scan-denominated plan worked out dearer per
+# $0.05 machine rate; the old scan-denominated plan worked out dearer per
 # scan than paying per call, so nobody rational would buy it. Sites are the
 # unit a human actually cares about and aren't comparable to the machine
 # rate, so the two audiences stop competing with each other.
@@ -142,37 +143,28 @@ ONEOFF_REPORT_PRICE_ID = os.environ.get("STRIPE_PRICE_ONEOFF_REPORT")
 # advertising the retired subscription long after Stripe had stopped selling
 # it, because the number lived in a second place nobody thought to update --
 # a quoted price that no checkout will honour is worse than no price at all.
-HUMAN_PLANS = [
-    {
-        "id": "report",
-        "name": "Single report",
-        "usd": 29.99,
-        "interval": "once",
-        "covers": "One site, all four checks, delivered as a shareable report page.",
-    },
-    {
-        "id": "pro",
-        "name": "Pro",
-        "usd": 79.0,
-        "interval": "month",
-        "covers": "5 sites, audited daily across all four dimensions, with history.",
-    },
-    {
-        "id": "agency",
-        "name": "Agency",
-        "usd": 249.0,
-        "interval": "month",
-        "covers": "50 sites, audited daily, with reports you can hand to clients.",
-    },
-]
+#
+# RETIRED 2026-09-06, owner's call: "why would anyone pay that when the
+# scans are 5 cents". The per-call rails are the product and the only
+# thing sold. Empty on purpose: human_plans_live() is [] on every deploy,
+# no surface advertises a tier, and /billing/checkout refuses a plan. The
+# quota and price-ID plumbing below stays only so a key issued before this
+# date keeps working until it lapses.
+HUMAN_PLANS: list = []
+
+
+def _plan_offered(plan_id: str) -> bool:
+    """Only a plan in HUMAN_PLANS can be sold; a configured Price ID for a
+    retired plan is not an offer."""
+    return any(p["id"] == plan_id for p in HUMAN_PLANS)
 
 
 def plan_available(plan: str) -> bool:
-    return bool(stripe_key_looks_valid() and PLAN_PRICE_IDS.get(plan))
+    return bool(_plan_offered(plan) and stripe_key_looks_valid() and PLAN_PRICE_IDS.get(plan))
 
 
 def oneoff_report_available() -> bool:
-    return bool(stripe_key_looks_valid() and ONEOFF_REPORT_PRICE_ID)
+    return bool(_plan_offered("report") and stripe_key_looks_valid() and ONEOFF_REPORT_PRICE_ID)
 
 
 def human_plans_live() -> list:
@@ -195,6 +187,16 @@ def human_plans_live() -> list:
 
 
 _db = None
+
+# Which store holds the api_key -> record mapping (and prepaid balances,
+# quotas, reports). "firestore" is the Cloud Run deployment's store
+# and the default; "sqlite" backs the same operations with one local file
+# (KEY_STORE_SQLITE_PATH), which is what makes this service deployable on a
+# host that is not Google -- the per-call rails never needed Google, but the
+# key the MPP top-up sells has to be written SOMEWHERE, and until this
+# existed that somewhere was Firestore only.
+_KEY_STORE_BACKEND = (os.environ.get("KEY_STORE") or "firestore").strip().lower()
+_KEY_STORE_SQLITE_PATH = os.environ.get("KEY_STORE_SQLITE_PATH", "/data/hubvibe-keys.db")
 
 
 def _any_sellable_price() -> bool:
@@ -219,13 +221,65 @@ def is_configured() -> bool:
     return bool(stripe_key_looks_valid() and _WEBHOOK_SECRET and _any_sellable_price())
 
 
+def _load_keystore_sqlite():
+    """Import the sibling module under either load style (package import, or
+    the by-file-path loading main.py documents), same discipline as main.py's
+    _load_sibling_module: one instance per process, cached in sys.modules."""
+    try:
+        from . import keystore_sqlite
+
+        return keystore_sqlite
+    except ImportError:
+        import importlib.util
+        import sys
+        from pathlib import Path
+
+        name = "wcag_audit_engine_keystore_sqlite"
+        cached = sys.modules.get(name)
+        if cached is not None:
+            return cached
+        module_path = Path(__file__).resolve().parent / "keystore_sqlite.py"
+        spec = importlib.util.spec_from_file_location(name, module_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+
 def _firestore():
     global _db
     if _db is None:
-        from google.cloud import firestore
+        if _KEY_STORE_BACKEND == "sqlite":
+            _db = _load_keystore_sqlite().SqliteKeyStore(_KEY_STORE_SQLITE_PATH)
+        elif _KEY_STORE_BACKEND == "firestore":
+            from google.cloud import firestore
 
-        _db = firestore.Client()
+            _db = firestore.Client()
+        else:
+            # Refuse to guess: a typo'd backend silently falling through to
+            # Firestore on a box with no Google credentials would fail every
+            # keyed call at runtime with the least useful possible error.
+            raise ValueError(
+                f"KEY_STORE is {_KEY_STORE_BACKEND!r}; it must be 'firestore' or 'sqlite'"
+            )
     return _db
+
+
+def _run_transactional(fn):
+    """Run fn(transaction) atomically on whichever key store is live.
+
+    The SQLite store brings its own transaction runner (BEGIN IMMEDIATE, so
+    two debits of one key serialize); Firestore's is the library's own
+    `transactional` decorator. One helper rather than a branch in each
+    caller, so the two spots that need atomicity -- the prepaid debit and
+    the quota increment -- cannot end up on different contracts.
+    """
+    db = _firestore()
+    if hasattr(db, "run_in_transaction"):
+        return db.run_in_transaction(fn)
+    from google.cloud import firestore
+
+    return firestore.transactional(fn)(db.transaction())
 
 
 def create_checkout_session(
@@ -240,6 +294,11 @@ def create_checkout_session(
     surfaced as an opaque 500 instead of telling the caller what to pick.
     """
     if plan:
+        if not _plan_offered(plan):
+            raise ValueError(
+                f"Plan {plan!r} is retired: there are no subscriptions. "
+                "Pay per call ($0.05 an audit, $0.15 the bundle) with a rail from the 402."
+            )
         price_id = PLAN_PRICE_IDS.get(plan)
         if not price_id:
             raise ValueError(f"Plan {plan!r} is not configured on this deployment")
@@ -361,27 +420,6 @@ def lookup_key(api_key: str) -> Optional[dict]:
     return doc.to_dict()
 
 
-def save_lead(url: str, email: Optional[str], violation_count: int) -> None:
-    """Record a free-scan lead for manual follow-up.
-
-    Best-effort: callers should catch failures rather than let a storage
-    hiccup break the free scan response for the visitor. This only stores
-    what the visitor themself submitted through the scan form -- it's not
-    used to look up or contact anyone who didn't submit their own site/email.
-    """
-    import time
-
-    db = _firestore()
-    db.collection("leads").add(
-        {
-            "url": url,
-            "email": email,
-            "violation_count": violation_count,
-            "created_at": time.time(),
-        }
-    )
-
-
 def record_usage(customer_id: str, price_cents: int) -> None:
     """Bill a completed audit call, for what the call actually costs.
 
@@ -390,9 +428,10 @@ def record_usage(customer_id: str, price_cents: int) -> None:
     call so a retried request can't double-bill.
 
     **The meter counts cents, not calls.** That is the whole fix. This used to
-    report one event per "unit", where a unit was a call ($0.03) or a third of
+    report one event per "unit", where a unit was a call ($0.05) or a third of
     a bundle -- and the metered Price on the account is $0.01 per unit, so a
-    $0.03 audit metered $0.01 and a $0.10 bundle metered $0.03. Every invoice
+    $0.05 audit metered $0.01 and a $0.15 bundle metered $0.03 under the old
+    per-call unit count. Every invoice
     this ever produced would have been for roughly a third of the money owed.
     It was invisible because the human plans are `licensed` flat prices with
     no metered item on the subscription: the events were accepted by Stripe,
@@ -400,7 +439,7 @@ def record_usage(customer_id: str, price_cents: int) -> None:
     waiting for the day someone attached the Price.
 
     Reporting the price in cents against a $0.01/unit Price makes the two
-    reconcile exactly -- 3 units for $0.03, 10 for $0.10 -- with no second
+    reconcile exactly -- 5 units for $0.05, 15 for $0.15 -- with no second
     meter, no second Price, and no per-route arithmetic anywhere else.
 
     Two facts live on the Stripe side, which is why both are variables here
@@ -465,7 +504,7 @@ def issue_prepaid_key(credit_cents: int) -> str:
 
     This is what makes the MPP `stripe` rail usable at all here. Stripe
     requires a minimum 0.50 USD charge for a card payment made with a Shared
-    Payment Token, and every route on this service is $0.03-$0.10 -- so a
+    Payment Token, and every route on this service is $0.05-$0.15 -- so a
     per-call SPT charge is rejected by Stripe on amount alone, and no amount
     of correct protocol work changes that. The rail can only settle if what it
     sells is a BLOCK, not a call.
@@ -512,12 +551,9 @@ def spend_prepaid(api_key: str, cents: int) -> bool:
     if cents <= 0:
         return False
 
-    from google.cloud import firestore
-
     try:
         ref = _firestore().collection("api_keys").document(api_key)
 
-        @firestore.transactional
         def _debit(transaction):
             snapshot = ref.get(transaction=transaction)
             if not snapshot.exists:
@@ -531,10 +567,48 @@ def spend_prepaid(api_key: str, cents: int) -> bool:
             transaction.update(ref, {"prepaid_balance_cents": balance - cents})
             return True
 
-        return bool(_debit(_firestore().transaction()))
+        return bool(_run_transactional(_debit))
     except Exception:
         _warn_key_store_unavailable_for_prepaid()
         return False
+
+
+def refund_prepaid(api_key: str, cents: int) -> bool:
+    """Put `cents` back on a prepaid key whose audit failed to run.
+
+    The debit is taken at authentication, before the audit, so a key with no
+    balance is refused before a browser is spent on it. The other half of
+    that ordering is this: an audit that then fails must hand the cents back,
+    or "you are charged only for an audit that produced a result" is true for
+    x402 payers and false for prepaid ones. Transactional for the same reason
+    the debit is. Never raises; a refund that could not be made is logged at
+    ERROR, because it is money the caller is owed.
+    """
+    if cents <= 0:
+        return False
+    try:
+        ref = _firestore().collection("api_keys").document(api_key)
+
+        def _credit(transaction):
+            snapshot = ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return False
+            balance = snapshot.to_dict().get("prepaid_balance_cents")
+            if balance is None:
+                return False
+            transaction.update(ref, {"prepaid_balance_cents": int(balance) + int(cents)})
+            return True
+
+        refunded = bool(_run_transactional(_credit))
+    except Exception:
+        refunded = False
+    if not refunded:
+        logging.getLogger(__name__).error(
+            "could not refund %d cents to a prepaid key after a failed audit; "
+            "the caller is owed it.",
+            cents,
+        )
+    return refunded
 
 
 _prepaid_store_warned = False
@@ -580,14 +654,10 @@ def check_and_increment_quota(customer_id: str, plan: Optional[str] = None) -> b
     """
     import datetime
 
-    from google.cloud import firestore
-
     try:
         period = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
-        db = _firestore()
-        ref = db.collection("quota_usage").document(f"{customer_id}:{period}")
+        ref = _firestore().collection("quota_usage").document(f"{customer_id}:{period}")
 
-        @firestore.transactional
         def _increment(transaction):
             snapshot = ref.get(transaction=transaction)
             count = snapshot.get("count") if snapshot.exists else 0
@@ -600,7 +670,7 @@ def check_and_increment_quota(customer_id: str, plan: Optional[str] = None) -> b
             )
             return True
 
-        return _increment(db.transaction())
+        return _run_transactional(_increment)
     except Exception:
         return True
 

@@ -52,7 +52,7 @@ def test_configured_offers_both_method_challenges(monkeypatch):
 def test_the_spt_rail_is_not_offered_below_stripes_minimum(monkeypatch):
     """Stripe rejects a card SPT charge under 0.50 USD outright.
 
-    Every route here is priced at $0.03-$0.10, so offering this rail on them
+    Every route here is priced at $0.05-$0.15, so offering this rail on them
     would hand an agent a challenge, take its single-use token, and fail at
     the API every time -- a rail advertised and unable to settle, which is the
     exact shape of the bug that made the x402 rail unpayable for months. Tempo
@@ -248,7 +248,7 @@ def test_a_topup_is_not_offered_above_the_floor(monkeypatch):
 
 def test_a_topup_credential_is_not_consumed_as_a_per_call_payment(monkeypatch):
     """The two intents mean different things. Letting a $0.50 top-up settle
-    through the per-call path would take the money, serve one $0.03 audit, and
+    through the per-call path would take the money, serve one $0.05 audit, and
     silently keep the rest."""
     module = _both_rails(monkeypatch)
     # Stripe is stubbed to ACCEPT, so the only thing that can refuse this is

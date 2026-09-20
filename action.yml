@@ -41,19 +41,18 @@ inputs:
   api-key:
     description: >-
       HubVibe API key, passed as X-API-Key. Optional: without it the run stops on
-      the service's HTTP 402 payment challenge and prints how to pay. Get a key at
-      https://hubvibe-831480473793.us-south1.run.app/billing/checkout
+      the service's HTTP 402 payment challenge and prints how to pay.
     required: false
     default: ""
   wallet-key:
     description: >-
       EVM private key (a repo secret) funded with USDC on Base, used to pay the
       402 per call via x402 -- no account, no checkout, no subscription. Costs
-      $0.03 a run ($0.10 for the bundle) and settles in seconds.
+      $0.05 a run ($0.15 for the bundle) and settles in seconds.
 
-      This exists because requiring a subscription before the first useful run
-      is an adoption wall: a CI step whose first execution fails and asks for
-      $29.99 gets deleted on the next push. With a wallet the pipeline funds
+      This exists because requiring an account before the first useful run is
+      an adoption wall: a CI step whose first execution fails and asks for a
+      signup gets deleted on the next push. With a wallet the pipeline funds
       itself once and simply works, which is the whole point of a machine-payable
       API.
 
@@ -96,7 +95,7 @@ inputs:
   base-url:
     description: "Override the service base URL (self-hosted or staging deployments)."
     required: false
-    default: "https://hubvibe-831480473793.us-south1.run.app"
+    default: "https://hubvibe-io.com"
 
 outputs:
   passed:
@@ -165,9 +164,13 @@ runs:
             "x402[evm]" eth-account httpx 2>/dev/null \
             || { echo "::error::could not install the x402 client extras"; exit 1; }
 
+          # x402_pay.py already logs the payer address and the cap before it
+          # signs anything. It must not be followed by an unconditional "paid"
+          # line: the same line printed after a refused signature, an empty
+          # wallet or a facilitator outage says the money moved when it did
+          # not, and sends the reader debugging the audit instead of the
+          # wallet. The status below is the only honest report of the outcome.
           http_code=$(python3 "$GITHUB_ACTION_PATH/scripts/x402_pay.py") || http_code="000"
-
-          echo "Paid via x402 from $(python3 -c 'import os;from eth_account import Account;print(Account.from_key(os.environ["HUBVIBE_WALLET_KEY"].strip()).address)' 2>/dev/null || echo 'the configured wallet')"
         else
 
         http_code="000"
@@ -222,7 +225,7 @@ runs:
         if [ "$http_code" != "200" ]; then
           echo "passed=false" >> "$GITHUB_OUTPUT"
           if [ "$http_code" = "402" ]; then
-            echo "::error::HubVibe audit was not paid for (HTTP 402). Set the api-key input, or pay per call with x402/MPP -- the challenge is in the response body above."
+            echo "::error::HubVibe audit was not paid for (HTTP 402). Set the wallet-key input to a funded EVM key and the run pays \$$MAX_PRICE_USD per call by itself -- the rails this node can settle are listed in the response body above."
           else
             echo "::error::HubVibe audit request failed with HTTP $http_code (see response.json above)"
           fi

@@ -3,24 +3,46 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HubVibe — machine-payable site audits for AI agents</title>
-<meta name="description" content="Metered API for site compliance audits: accessibility, SEO, security headers, performance. Paid machine-to-machine over HTTP 402, or watched per site on a plan.">
-<link rel="canonical" href="https://hubvibe-831480473793.us-south1.run.app/">
+<title>HubVibe — machine-payable services for AI agents</title>
+<meta name="description" content="A machine-service gateway for autonomous agents: site compliance audits, LLM inference, web search and extraction, blockchain and market data, media generation, sandboxed compute. Software pays per call over HTTP 402 -- no account, no subscription.">
+<link rel="canonical" href="https://hubvibe-io.com/">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="theme-color" content="#000000">
+<!-- Base app registration. Base's verifier fetches this page and reads this
+     tag to confirm the domain belongs to the app, so it must be live on / at
+     the moment Register is pressed -- a deploy that lands after verification
+     is a deploy that verified nothing. Public identifier, not a secret.
+
+     Written self-closing (" />"), byte-identical to the snippet Base's Add
+     Domain dialog hands out. An HTML parser treats <meta ...> and
+     <meta ... /> as the same element, but a verifier that string-matches
+     its own snippet does not, and that failure is silent: the tag is
+     present, the page is correct, and registration simply never completes.
+     Matching the vendor's exact bytes costs nothing and removes the
+     guess.
+
+     The id below is the one the owner's Add Domain dialog was serving on
+     2026-09-07, read off the dashboard. It REPLACED 6a8383066ea1f57fed333625,
+     which this page carried since #84: as ObjectIDs the two were minted 35
+     seconds apart, so the app was created twice and the dashboard finished
+     setup on the second. One page can prove one app -- the tag is singular
+     and two would verify neither -- so it names the app whose setup is
+     actually open. If Base ever asks for the older id again, swap it back
+     here and in its test; nothing else reads it. -->
+<meta name="base:app_id" content="6a83832901463168d7e651ca" />
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="HubVibe">
-<meta property="og:title" content="HubVibe — machine-payable site audits for AI agents">
-<meta property="og:description" content="A metered API for site compliance audits, paid machine-to-machine over HTTP 402. Deterministic checks, never an LLM guess.">
-<meta property="og:url" content="https://hubvibe-831480473793.us-south1.run.app/">
-<meta property="og:image" content="https://hubvibe-831480473793.us-south1.run.app/og-image.png">
+<meta property="og:title" content="HubVibe — machine-payable services for AI agents">
+<meta property="og:description" content="A machine-service gateway: audits, AI inference, search, extraction, chain and market data, media, compute -- paid machine-to-machine over HTTP 402.">
+<meta property="og:url" content="https://hubvibe-io.com/">
+<meta property="og:image" content="https://hubvibe-io.com/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="HubVibe — machine-payable site audits: accessibility, SEO, security, performance.">
+<meta property="og:image:alt" content="HubVibe — machine-payable services: audits, AI, search, blockchain, market data, media, compute.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="HubVibe — machine-payable site audits for AI agents">
-<meta name="twitter:description" content="A metered API for site compliance audits, paid machine-to-machine over HTTP 402.">
-<meta name="twitter:image" content="https://hubvibe-831480473793.us-south1.run.app/og-image.png">
+<meta name="twitter:title" content="HubVibe — machine-payable services for AI agents">
+<meta name="twitter:description" content="A machine-service gateway for autonomous agents, paid machine-to-machine over HTTP 402.">
+<meta name="twitter:image" content="https://hubvibe-io.com/og-image.png">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -28,28 +50,23 @@
   "name": "HubVibe",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "Any",
-  "url": "https://hubvibe-831480473793.us-south1.run.app/",
-  "description": "Metered API for site compliance audits: accessibility (axe-core), SEO, security headers, and performance. Machine-payable per call over HTTP 402.",
+  "url": "https://hubvibe-io.com/",
+  "description": "Machine-service gateway for autonomous agents: site compliance audits, LLM inference, web search and extraction, blockchain and market data, prediction-market data, media generation and sandboxed compute. Machine-payable per call over HTTP 402.",
   "featureList": [
     "WCAG 2.1 A/AA accessibility audit via axe-core",
     "SEO structure and metadata audit",
     "Security response-header audit",
     "Performance measurement from a real page load",
+    "LLM inference (Claude, Gemini, OpenAI) with failover",
+    "Web search, fetch and content extraction",
+    "Read-only blockchain RPC on Base",
+    "Market and prediction-market data",
+    "Image and voice generation",
+    "Sandboxed code execution",
+    "Composite research jobs with cited sources",
     "HTTP 402 machine payments, no account required"
   ],
-  "offers": {
-    "@type": "AggregateOffer",
-    "priceCurrency": "USD",
-    "lowPrice": "29.99",
-    "highPrice": "249.00",
-    "offerCount": "5",
-    "offers": [
-      {"@type": "Offer", "name": "Single report", "price": "29.99", "priceCurrency": "USD"},
-      {"@type": "Offer", "name": "Pro", "price": "79.00", "priceCurrency": "USD"},
-      {"@type": "Offer", "name": "Agency", "price": "249.00", "priceCurrency": "USD"}
-    ]
-  },
-  "provider": {"@type": "Organization", "name": "HubVibe", "url": "https://hubvibe-831480473793.us-south1.run.app/"}
+  "provider": {"@type": "Organization", "name": "HubVibe", "url": "https://hubvibe-io.com/"}
 }
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -182,7 +199,7 @@
   .k { color: var(--accent-soft); }
   .s { color: var(--accent); }
   .n { color: #7dd3fc; }
-  .c { color: var(--dim); }
+  .c { color: var(--muted); font-style: italic; }
 
   .copy-btn {
     background: transparent; border: 1px solid var(--line-bright); color: var(--muted);
@@ -194,9 +211,6 @@
   /* ---- audit grid ---- */
   .audits { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   .audit { background: var(--bg); padding: 26px 24px; }
-  .audit .price {
-    font-family: var(--mono); font-size: 12px; color: var(--accent); margin-bottom: 10px;
-  }
   .audit p { margin: 0; color: var(--muted); font-size: 14.5px; }
   .audit .route { font-family: var(--mono); font-size: 12px; color: var(--dim); margin-top: 12px; }
 
@@ -216,40 +230,6 @@
     font-size: 14.5px; display: flex; justify-content: space-between; gap: 18px;
   }
   .price-list li span:last-child { font-family: var(--mono); color: var(--text); white-space: nowrap; }
-
-  .secondary-card {
-    border: 1px solid var(--line); border-radius: 12px; padding: 28px;
-    background: var(--surface-2);
-  }
-  .secondary-card h3 { margin-bottom: 6px; }
-  .secondary-card p { color: var(--muted); font-size: 14.5px; margin: 0 0 20px; }
-
-  .tiers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-  .tier {
-    border: 1px solid var(--line); border-radius: 12px; padding: 26px;
-    background: var(--surface-2); display: flex; flex-direction: column;
-  }
-  .tier-name {
-    font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
-    text-transform: uppercase; color: var(--accent); margin-bottom: 14px;
-  }
-  .tier-price {
-    font-size: 34px; font-weight: 800; letter-spacing: -.02em; margin-bottom: 14px;
-  }
-  .tier-price span { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 5px; }
-  .tier p { color: var(--muted); font-size: 14px; margin: 0 0 20px; flex: 1; }
-  .tier form { flex-direction: column; }
-  .tier input { width: 100%; margin-bottom: 8px; }
-
-  form { display: flex; gap: 10px; flex-wrap: wrap; }
-  input[type=email], input[type=url] {
-    flex: 1; min-width: 220px; background: #000; border: 1px solid var(--line-bright);
-    color: var(--text); border-radius: 8px; padding: 12px 14px;
-    font-family: inherit; font-size: 15px;
-  }
-  input[type=email]::placeholder, input[type=url]::placeholder { color: var(--dim); }
-  input[type=email]:focus, input[type=url]:focus { outline: none; border-color: var(--accent); }
-  .form-msg { color: var(--muted); font-size: 13.5px; margin: 12px 0 0; min-height: 18px; }
 
   /* ---- guarantees ---- */
   .guarantees { list-style: none; padding: 0; margin: 0; display: grid; gap: 18px; }
@@ -276,7 +256,7 @@
   .footnote { color: var(--dim); font-size: 13px; margin-top: 14px; max-width: 68ch; }
 
   @media (max-width: 860px) {
-    .split, .audits, .endpoints, .tiers { grid-template-columns: 1fr; }
+    .split, .audits, .endpoints { grid-template-columns: 1fr; }
     .split { gap: 40px; }
     .nav-links { gap: 18px; }
     .nav-links a.hide-sm { display: none; }
@@ -311,6 +291,7 @@
     </a>
     <div class="nav-links">
       <a href="#protocol" class="hide-sm">Protocol</a>
+      <a href="#capabilities">Capabilities</a>
       <a href="#audits">Audits</a>
       <a href="#pricing">Pricing</a>
       <a href="/docs">API</a>
@@ -318,14 +299,15 @@
   </nav>
 
   <header>
-    <p class="eyebrow">Agent-to-agent infrastructure</p>
-    <h1>Site audits your software can buy on its own.</h1>
+    <p class="eyebrow">Machine-economy infrastructure</p>
+    <h1>Services your software can buy on its own.</h1>
     <p class="lede">
-      HubVibe is a metered API for site compliance. An agent calls an endpoint,
-      gets an HTTP 402 with the price and how to pay, settles it, and receives a
-      result — <strong>no account, no sales call, no human in the loop</strong>.
-      Every check is a deterministic rule run against the live page, never a
-      language model's opinion.
+      HubVibe is a gateway where autonomous agents discover, use and pay for
+      machine services — compliance audits, AI inference, search and
+      extraction, on-chain and market data, media, compute. An agent calls an
+      endpoint, gets an HTTP 402 with the price and how to pay, settles it,
+      and receives a result — <strong>no account, no sales call, no human in
+      the loop</strong>.
     </p>
     <div class="cta-row">
       <a class="btn btn-primary" href="/.well-known/agent.json">Read the machine manifest</a>
@@ -348,22 +330,75 @@
         <div class="code-head"><span>HTTP 402 — POST /audit/wcag</span></div>
 <pre class="code-body">{
   <span class="k">"error"</span>: <span class="s">"payment_required"</span>,
-  <span class="k">"price_usd"</span>: <span class="n">0.03</span>,
+  <span class="k">"price_usd"</span>: <span class="n">0.05</span>,
   <span class="k">"accepts"</span>: [
-    {
-      <span class="k">"protocol"</span>: <span class="s">"mpp"</span>,
-      <span class="k">"method"</span>: <span class="s">"tempo"</span>,
-      <span class="k">"send_via_header"</span>: <span class="s">"Authorization: Payment ..."</span>
-    }
+    <span class="c">// every rail this node can settle,</span>
+    <span class="c">// each in its own protocol's shape</span>
   ],
+  <span class="k">"other_rails"</span>: [],
   <span class="k">"docs"</span>: <span class="s">"/.well-known/agent.json"</span>
 }</pre>
       </div>
     </div>
   </section>
 
+  <section id="capabilities">
+    <h2>What agents can buy here</h2>
+    <p class="section-lead">One gateway, one payment flow, a growing repertoire of machine services.</p>
+    <div class="audits">
+      <div class="audit">
+        <h3>AI models</h3>
+        <p>LLM inference across Gemini and Claude (via Vertex Model Garden), with provider and model choice — the exact model that ran comes back with measured token usage.</p>
+        <div class="route">POST /work/llm/analyze · /work/llm/extract · /work/llm/generate</div>
+      </div>
+      <div class="audit">
+        <h3>Search &amp; research</h3>
+        <p>Grounded web search, guarded page fetch, structured extraction — and composite research jobs that return one cited answer, on a page, a question, or a company.</p>
+        <div class="route">POST /work/search/web · /work/research/web · /work/research/company</div>
+      </div>
+      <div class="audit">
+        <h3>Compute &amp; data</h3>
+        <p>BigQuery queries, plain-language questions, forecasting and anomaly detection against a dataset, plus code execution in Google's own hosted sandbox.</p>
+        <div class="route">POST /work/data/query · /work/data/forecast · /work/code/execute</div>
+      </div>
+      <div class="audit">
+        <h3>Blockchain</h3>
+        <p>Read-only JSON-RPC against Base mainnet: balances, blocks, transactions, receipts, logs, contract calls. No broadcasting, by design.</p>
+        <div class="route">POST /work/chain/address · /work/chain/transaction · /work/chain/rpc</div>
+      </div>
+      <div class="audit">
+        <h3>Market intelligence</h3>
+        <p>Live spot prices, exchange-rate tables and tickers from public Coinbase data — plus prediction-market questions, prices and volumes.</p>
+        <div class="route">POST /work/market/intel · /work/market/quote · /work/market/prediction</div>
+      </div>
+      <div class="audit">
+        <h3>Media</h3>
+        <p>Image generation (Imagen), voice synthesis and transcription (Cloud Speech), delivered in the response itself — the only channel a per-call payer needs.</p>
+        <div class="route">POST /work/image/generate · /work/speech/synthesize</div>
+      </div>
+      <div class="audit">
+        <h3>Site audits</h3>
+        <p>The original product: deterministic accessibility, SEO, security-header and performance checks against the live page.</p>
+        <div class="route">POST /audit/*</div>
+      </div>
+      <div class="audit">
+        <h3>Agent network</h3>
+        <p>MCP · A2A · HTTP 402 · USDC · BASE. Discovery via the agent manifest, a live MCP endpoint, and payment challenges that carry the catalog.</p>
+        <div class="route">POST /mcp · GET /.well-known/agent.json</div>
+      </div>
+    </div>
+    <p class="footnote">
+      Which capabilities are live on a given node is deployment state, not a
+      promise: the <a href="/.well-known/agent.json">agent manifest</a> lists
+      exactly what this node sells right now, and <a href="/work">/work</a>
+      indexes the worker network for free, including why anything unavailable
+      is off. A capability without a configured provider is omitted, never
+      advertised broken.
+    </p>
+  </section>
+
   <section id="audits">
-    <h2>What it checks</h2>
+    <h2>The audit suite</h2>
     <p class="section-lead">Four dimensions. Run one, or run all four in a single billed call.</p>
     <div class="audits">
       <div class="audit">
@@ -414,42 +449,6 @@
       </ul>
     </div>
 
-    <h2 style="margin-top:52px">For people, not pipelines</h2>
-    <p class="section-lead">Priced per site watched — not per scan.</p>
-    <p style="color:var(--muted);font-size:15px;max-width:56ch;margin:0 0 30px;">
-      If you'd rather have a report than an integration, buy one. These are
-      billed by how many sites you want covered, because that's the thing
-      you actually care about.
-    </p>
-
-    <div class="tiers">
-      <div class="tier">
-        <div class="tier-name">Single report</div>
-        <div class="tier-price">$29.99<span>once</span></div>
-        <p>One site, all four checks, delivered as a shareable report page. No account, no subscription.</p>
-        <form id="report-form">
-          <input type="url" id="report-url" placeholder="https://yoursite.com" required aria-label="Site to audit">
-          <input type="email" id="report-email" placeholder="you@company.com" required aria-label="Email address">
-          <button type="submit" class="btn btn-primary" id="report-button" style="width:100%">Buy the report</button>
-        </form>
-        <p class="form-msg" id="report-message"></p>
-      </div>
-
-      <div class="tier">
-        <div class="tier-name">Pro</div>
-        <div class="tier-price">$79<span>/month</span></div>
-        <p>5 sites, audited daily across all four dimensions, with history so you can see what changed.</p>
-        <button class="btn btn-ghost plan-btn" data-plan="pro" style="width:100%">Start Pro</button>
-      </div>
-
-      <div class="tier">
-        <div class="tier-name">Agency</div>
-        <div class="tier-price">$249<span>/month</span></div>
-        <p>50 sites, audited daily, reports you can hand to your own clients. Built for people who bill for this.</p>
-        <button class="btn btn-ghost plan-btn" data-plan="agency" style="width:100%">Start Agency</button>
-      </div>
-    </div>
-    <p class="form-msg" id="plan-message"></p>
   </section>
 
   <section id="guarantees">
@@ -468,8 +467,10 @@
       <div>
         <p class="section-lead">One request. Works from anything that speaks HTTP.</p>
         <p style="color:var(--muted);font-size:15px;max-width:46ch;">
-          Machine callers discover pricing, schemas, and payment rails from the
-          manifests — no documentation scraping required.
+          Start unauthenticated: the call returns the 402 above, carrying the
+          price and the rails this node can settle. Settle one and repeat the
+          same request with the header that rail names — or let a client
+          library do both in one call.
         </p>
         <div class="endpoints" style="margin-top:26px;grid-template-columns:1fr;">
           <a class="endpoint" href="/.well-known/agent.json"><code>/.well-known/agent.json</code><span>Agent manifest</span></a>
@@ -483,10 +484,12 @@
           <span>curl</span>
           <button class="copy-btn" id="copy-curl-button">Copy</button>
         </div>
-<pre class="code-body" id="curl-example">curl -X POST https://hubvibe-831480473793.us-south1.run.app/audit/bundle \
+<pre class="code-body" id="curl-example">curl -X POST https://hubvibe-io.com/audit/bundle \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: $HUBVIBE_KEY" \
-  -d '{"url":"https://example.com"}'</pre>
+  -d '{"url":"https://example.com"}'
+# -> 402 with the price and the payable rails.
+# Settle one, then repeat this call carrying the
+# payment header that rail's entry names.</pre>
       </div>
     </div>
   </section>
@@ -503,7 +506,7 @@
       </svg>
       <span class="brand-name" style="color:var(--dim);">HUBVIBE</span>
     </div>
-    HubVibe — machine-payable site compliance auditing.
+    HubVibe — machine-payable services for autonomous agents.
     <a href="/docs">API reference</a> ·
     <a href="/.well-known/agent.json">Agent manifest</a> ·
     <a href="https://github.com/its-fortunatefolly/hubvibe" target="_blank" rel="noopener">Source</a>
@@ -511,61 +514,6 @@
 </div>
 
 <script>
-async function postJSON(url, body) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  return { ok: res.ok, status: res.status, data };
-}
-
-document.getElementById("report-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const button = document.getElementById("report-button");
-  const messageEl = document.getElementById("report-message");
-  button.disabled = true;
-  button.textContent = "Redirecting…";
-  messageEl.textContent = "";
-
-  const { ok, data } = await postJSON("/billing/report", {
-    url: document.getElementById("report-url").value,
-    email: document.getElementById("report-email").value,
-  });
-
-  if (!ok || !data.checkout_url) {
-    button.disabled = false;
-    button.textContent = "Buy the report";
-    messageEl.textContent = data.detail || "Checkout isn't available right now.";
-    return;
-  }
-  window.location.href = data.checkout_url;
-});
-
-document.querySelectorAll(".plan-btn").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    const messageEl = document.getElementById("plan-message");
-    const email = window.prompt("Email for your subscription and API key:");
-    if (!email) return;
-
-    const original = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = "Redirecting…";
-    messageEl.textContent = "";
-
-    const { ok, data } = await postJSON("/billing/checkout", { email, plan: btn.dataset.plan });
-
-    if (!ok || !data.checkout_url) {
-      btn.disabled = false;
-      btn.textContent = original;
-      messageEl.textContent = data.detail || "That plan isn't available right now.";
-      return;
-    }
-    window.location.href = data.checkout_url;
-  });
-});
-
 document.getElementById("copy-curl-button").addEventListener("click", async () => {
   const button = document.getElementById("copy-curl-button");
   const text = document.getElementById("curl-example").textContent;

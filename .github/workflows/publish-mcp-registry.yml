@@ -1,0 +1,60 @@
+# Publish server.json to the official MCP registry.
+#
+# The registry entry is what MCP clients and the directories that mirror the
+# registry (PulseMCP, Glama, Smithery) read to find this node. It went stale
+# once already: for a month it pointed at the old Cloud Run URL and version
+# 1.1.0 while server.json said 1.2.0 and the domain, because republishing
+# needed a browser login on a machine with the publisher installed.
+#
+# GitHub Actions OIDC removes the login: the registry accepts the workflow's
+# identity token for the io.github.Its-fortunatefolly/* namespace. Runs on
+# demand, and whenever server.json changes on main. Bump `version` before
+# any change -- the registry rejects a version it already serves, and this
+# job then fails loudly rather than quietly serving the old entry.
+name: Publish MCP registry entry
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths: [ "server.json" ]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Login with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      # The registry rejects a version it already serves, so a re-run after a
+      # successful publish must not publish again: read the LATEST entry first
+      # (the search lists every version, oldest first) and skip when it
+      # already matches. Then the same read is the proof.
+      - name: Publish server.json unless the registry already serves this version
+        run: |
+          latest() {
+            curl -fsSL "https://registry.modelcontextprotocol.io/v0/servers/io.github.Its-fortunatefolly%2Fhubvibe/versions" \
+              | python3 -c 'import sys, json; s=[x for x in json.load(sys.stdin)["servers"] if x.get("_meta", {}).get("io.modelcontextprotocol.registry/official", {}).get("isLatest")]; print(s[0]["server"]["version"] if s else "absent")'
+          }
+          want=$(python3 -c 'import json; print(json.load(open("server.json"))["version"])')
+          got=$(latest)
+          echo "server.json=$want registry latest=$got"
+          if [ "$want" = "$got" ]; then
+            echo "registry already serves $want -- nothing to publish"
+          else
+            ./mcp-publisher publish
+            got=$(latest)
+            echo "registry latest now=$got"
+          fi
+          [ "$want" = "$got" ] || { echo "::error::registry serves $got, not $want"; exit 1; }

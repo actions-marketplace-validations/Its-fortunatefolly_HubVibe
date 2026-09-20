@@ -261,9 +261,184 @@ def test_published_prices_match_the_service_catalog():
     service's rates change and these do not, the ceiling stops meaning what
     it says."""
     assert tollbooth.PRICES_USD == {
-        "wcag": 0.03,
-        "seo": 0.03,
-        "security": 0.03,
-        "performance": 0.03,
-        "bundle": 0.10,
+        "wcag": 0.05,
+        "seo": 0.05,
+        "security": 0.05,
+        "performance": 0.05,
+        "bundle": 0.15,
     }
+
+
+# --- x402 client arity: 2.18 takes (headers, body), 2.21 requires a third ---
+#
+# Found by running scripts/first-paid-call.sh against a locally booted node.
+# It died with:
+#
+#   HubVibeError: Could not construct an x402 payment:
+#     x402HTTPClientSync.handle_402_response() missing 1 required
+#     positional argument: 'request_url'
+#
+# requirements.txt pinned x402==2.18.0 at the time (2.22.0 now, which takes
+# the third argument), so the service and the test suite were safe. The two
+# places that are not: first-paid-call.sh shells out to bare
+# `python3`, which resolves to whatever x402 the machine has; and this module
+# ships to agent authors who install x402 themselves. The TypeError lands
+# before any signature exists, so there is nothing on-chain to look at and no
+# facilitator involved -- indistinguishable, from the server side, from nobody
+# buying. That is the #61 failure shape exactly.
+
+
+def test_a_2_21_style_client_is_given_the_request_url(mock_http, monkeypatch):
+    """x402 >= 2.21 requires request_url. Calling it with two arguments raises
+    before a payment can be constructed, which is how a funded agent bounces
+    in silence."""
+    seen = {}
+
+    def handler(request):
+        if not seen.get("challenged"):
+            seen["challenged"] = True
+            return httpx.Response(402, json={"price": "$0.10"})
+        return httpx.Response(200, json={"pass": True})
+
+    mock_http(handler)
+    booth = _client(wallet_key=THROWAWAY_KEY, budget_usd=1.0)
+
+    def v221(headers, body, request_url):
+        seen["request_url"] = request_url
+        return ({"PAYMENT-SIGNATURE": "signed"}, object())
+
+    monkeypatch.setattr(booth._http_client, "handle_402_response", v221)
+
+    result = booth.audit("https://example.com")
+    assert result["pass"] is True
+    # The URL handed over must be the one that was actually challenged -- a
+    # v2 client binds the signature to it, so a wrong URL signs for the wrong
+    # resource and the facilitator rejects it.
+    assert seen["request_url"].endswith("/audit/bundle")
+    assert seen["request_url"].startswith(booth.base_url)
+
+
+def test_a_2_18_style_client_is_still_called_with_two_arguments(mock_http, monkeypatch):
+    """The pinned version must keep working: passing an extra argument to it
+    raises exactly as loudly as omitting one from 2.21."""
+    seen = {}
+
+    def handler(request):
+        if not seen.get("challenged"):
+            seen["challenged"] = True
+            return httpx.Response(402, json={"price": "$0.10"})
+        return httpx.Response(200, json={"pass": True})
+
+    mock_http(handler)
+    booth = _client(wallet_key=THROWAWAY_KEY, budget_usd=1.0)
+
+    def v218(headers, body):
+        seen["argc"] = 2
+        return ({"PAYMENT-SIGNATURE": "signed"}, object())
+
+    monkeypatch.setattr(booth._http_client, "handle_402_response", v218)
+
+    assert booth.audit("https://example.com")["pass"] is True
+    assert seen["argc"] == 2
+
+
+def test_an_uninspectable_handler_falls_back_to_the_pinned_arity(mock_http, monkeypatch):
+    """Some callables have no introspectable signature. Guessing the newer
+    arity there would break the version this repo actually pins."""
+    seen = {}
+
+    def handler(request):
+        if not seen.get("challenged"):
+            seen["challenged"] = True
+            return httpx.Response(402, json={"price": "$0.10"})
+        return httpx.Response(200, json={"pass": True})
+
+    mock_http(handler)
+    booth = _client(wallet_key=THROWAWAY_KEY, budget_usd=1.0)
+
+    class Uninspectable:
+        def __call__(self, *args):
+            seen["argc"] = len(args)
+            return ({"PAYMENT-SIGNATURE": "signed"}, object())
+
+        def __getattr__(self, name):  # pragma: no cover - defensive
+            raise AttributeError(name)
+
+    obj = Uninspectable()
+    monkeypatch.setattr(
+        tollbooth.inspect, "signature",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("no signature")),
+    )
+    monkeypatch.setattr(booth._http_client, "handle_402_response", obj)
+
+    assert booth.audit("https://example.com")["pass"] is True
+    assert seen["argc"] == 2
+
+
+# --- the settlement receipt -------------------------------------------------
+
+
+def _b64(obj: dict) -> str:
+    import base64
+    import json
+
+    return base64.b64encode(json.dumps(obj).encode()).decode()
+
+
+def _paid_booth(mock_http, monkeypatch, paid_response: httpx.Response):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(402, json={"price": "$0.03"})
+        return paid_response
+
+    mock_http(handler)
+    booth = _client(wallet_key=THROWAWAY_KEY, budget_usd=1.0)
+    monkeypatch.setattr(
+        booth._http_client,
+        "handle_402_response",
+        lambda headers, body: ({"PAYMENT-SIGNATURE": "signed"}, object()),
+    )
+    return booth
+
+
+def test_the_settlement_receipt_is_kept_from_the_payment_response_header(mock_http, monkeypatch):
+    """The receipt is the payer's only on-chain reference. The client keeps
+    it where a script can print it -- first-paid-call.sh prints the Basescan
+    link for exactly this transaction hash."""
+    receipt = {"success": True, "transaction": "0x" + "cd" * 32, "network": "eip155:8453"}
+    booth = _paid_booth(
+        mock_http, monkeypatch,
+        httpx.Response(200, json={"pass": True}, headers={"PAYMENT-RESPONSE": _b64(receipt)}),
+    )
+    assert booth.last_settlement is None, "nothing paid yet"
+
+    assert booth.audit("https://example.com", endpoint="wcag")["pass"] is True
+    assert booth.last_settlement == receipt
+
+
+def test_the_v1_receipt_header_name_is_read_too(mock_http, monkeypatch):
+    receipt = {"success": True, "transaction": "0x" + "ef" * 32, "network": "base"}
+    booth = _paid_booth(
+        mock_http, monkeypatch,
+        httpx.Response(200, json={"pass": True}, headers={"X-PAYMENT-RESPONSE": _b64(receipt)}),
+    )
+    booth.audit("https://example.com", endpoint="wcag")
+    assert booth.last_settlement["transaction"] == "0x" + "ef" * 32
+
+
+def test_a_paid_200_without_a_receipt_still_delivers(mock_http, monkeypatch):
+    booth = _paid_booth(mock_http, monkeypatch, httpx.Response(200, json={"pass": True}))
+    assert booth.audit("https://example.com", endpoint="wcag")["pass"] is True
+    assert booth.last_settlement is None
+
+
+def test_a_malformed_receipt_never_turns_a_paid_audit_into_an_error(mock_http, monkeypatch):
+    booth = _paid_booth(
+        mock_http, monkeypatch,
+        httpx.Response(200, json={"pass": True}, headers={"PAYMENT-RESPONSE": "%%%not-base64"}),
+    )
+    assert booth.audit("https://example.com", endpoint="wcag")["pass"] is True
+    assert booth.last_settlement is None

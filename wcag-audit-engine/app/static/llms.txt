@@ -1,19 +1,28 @@
-# HubVibe Site Compliance Auditing Suite
+# HubVibe -- machine-payable services for autonomous agents
 
-> Rule-based, verifiable site audits -- accessibility (axe-core), SEO,
-> security headers, and performance -- callable a la carte or as a single
-> bundle. Every result is a deterministic check against the actual page;
-> nothing here is an LLM guessing at quality, and a check that couldn't
-> run is never reported as a false pass.
+> A machine-service gateway: site compliance audits plus a catalog of
+> per-call capabilities -- LLM inference, web search and extraction,
+> blockchain/market/prediction-market data, media generation, sandboxed
+> compute, composite research -- every one paid per call over HTTP 402
+> with no account and no human in the loop. The audits are deterministic
+> checks against the actual page; a check that couldn't run is never
+> reported as a false pass, and a call that produced no result is never
+> billed.
 
-Base URL: https://hubvibe-831480473793.us-south1.run.app
+Base URL: https://hubvibe-io.com
 
 Machine-readable discovery:
 - /.well-known/agent.json -- full manifest: pricing, live payment rails,
   rate limits, per-endpoint examples
 - /openapi.json -- OpenAPI 3.1 spec for all routes
 - /mcp -- live MCP endpoint (Streamable HTTP, JSON-RPC). Discovery via
-  initialize/tools/list is free; tools/call is billed per call.
+  initialize/tools/list is free; tools/call is billed per call. It speaks
+  the x402 MCP protocol: an unpaid tools/call returns isError with the v2
+  PaymentRequired in structuredContent; send the signed PaymentPayload in
+  params._meta["x402/payment"] (the x402.mcp client does this for you) and
+  the settlement receipt comes back in the result's
+  _meta["x402/payment-response"]. X-PAYMENT / PAYMENT-SIGNATURE / X-API-Key
+  headers on the POST work as well.
 - /mcp.json -- static MCP tool definitions with their httpEndpoint
 - /docs -- interactive API reference
 
@@ -28,37 +37,129 @@ key, an x402 on-chain payment, or an MPP (Machine Payments Protocol)
 payment. There is no free tier and no unauthenticated access: every audit
 costs a real browser page load, so every audit is paid for.
 
-- POST /audit/wcag -- $0.03 -- WCAG 2.1 A/AA accessibility audit via axe-core.
+- POST /audit/wcag -- $0.05 -- Website accessibility audit (a11y, WCAG compliance check): WCAG 2.1 level
+  A and AA conformance of any live URL or raw HTML, tested with axe-core
+  in a real headless browser. Returns every violation with rule id,
+  impact, help text and affected node count. Deterministic rules; a check
+  that cannot run returns an error, never a pass.
   Input: {"html": "string (optional)", "url": "string (optional, one of html/url required)"}
 
-- POST /audit/seo -- $0.03 -- Title, meta description, H1 structure,
-  canonical link, OpenGraph tags, structured data, and lang attribute.
+- POST /audit/seo -- $0.05 -- SEO audit of a web page (on-page SEO check) for any live URL or raw HTML:
+  title tag, meta description, H1 heading structure, canonical link,
+  OpenGraph and social tags, JSON-LD structured data, html lang attribute.
+  Rule-by-rule findings with severity and what is missing or malformed.
   Input: {"html": "string (optional)", "url": "string (optional, one of html/url required)"}
 
-- POST /audit/security -- $0.03 -- HTTPS, HSTS, CSP, X-Content-Type-Options,
-  clickjacking protection, Referrer-Policy, and CORS from a live HTTP
-  response. Not a TLS/cipher scan or a penetration test.
+- POST /audit/security -- $0.05 -- Security headers check for a website: audits HTTPS, HSTS, Content-
+  Security-Policy (CSP), X-Content-Type-Options, X-Frame-Options /
+  clickjacking protection, Referrer-Policy and CORS from the real HTTP
+  response of any live URL. Findings with severity for what is missing.
+  Header posture only, not a penetration test.
   Input: {"url": "string (required)"}
 
-- POST /audit/performance -- $0.03 -- DOM node count, transferred bytes,
-  and request count from one real page load. Not a full Lighthouse audit.
+- POST /audit/performance -- $0.05 -- Page speed and page weight audit of a web page from one real browser load:
+  total bytes transferred, HTTP request count and DOM node count, measured
+  rather than estimated, with findings when the page is heavy. Page-weight
+  signals, not Core Web Vitals.
   Input: {"url": "string (required)"}
 
-- POST /audit/bundle -- $0.10 -- Runs wcag + seo + security + performance
-  against one URL, billed as a single call. Atomic: if any dimension
-  fails to run, nothing is billed.
+- POST /audit/bundle -- $0.15 -- Full website audit in one call: accessibility (WCAG 2.1 A/AA via axe-
+  core), on-page SEO, HTTP security headers and page speed / page weight,
+  from a single browser load of one URL. Cheaper than four separate calls;
+  if any part cannot run, nothing is billed.
   Input: {"url": "string (required)"}
 
-- POST /audit -- $0.03 -- Alias of /audit/wcag, kept for backward compatibility.
+- POST /audit -- $0.05 -- Alias of /audit/wcag, kept for backward compatibility.
+
+## Worker network (/work/*) -- completed work
+
+Priced per call on the same HTTP 402 rail as the audits. GET /work (free)
+lists every worker live on this node with its price, tier, input schema and
+what it returns; a worker whose provider is not configured is listed as
+unavailable and never quoted. Send an Idempotency-Key header to make a retry
+safe: a repeated key returns the stored result and is not charged again.
+
+Utility (one live read, $0.02-$0.10):
+- POST /work/chain/network -- Base mainnet block height and gas price
+- POST /work/chain/address -- one Base address: balance, transaction count,
+  contract or wallet
+- POST /work/chain/transaction -- one Base transaction with its receipt
+- POST /work/chain/rpc -- generic allowlisted read-only JSON-RPC on Base
+- POST /work/market/quote -- live Coinbase spot price and 24h change
+- POST /work/market/rates -- Coinbase exchange-rate table for one currency
+- POST /work/market/ticker -- live bid/ask/volume from Coinbase's Exchange
+  data host (independent of market/quote)
+- POST /work/market/prediction -- live Polymarket markets as implied
+  probabilities
+- POST /work/prediction/market -- one Polymarket market by slug
+- POST /work/prediction/events -- live Polymarket events by volume
+- POST /work/extract/page -- readable text, title and links from any page,
+  rendered in a real browser
+- POST /work/fetch/raw -- raw HTTP fetch: status, headers, body, any status
+  code (unlike extract/page, a 404/500 from the target is a result)
+- POST /work/search/web -- live web search, grounded via Gemini's Google
+  Search tool
+- POST /work/maps/places -- search places via Google's managed Maps
+  Grounding Lite MCP server (needs an operator-set key)
+- POST /work/maps/route -- directions between two places (same server)
+- POST /work/maps/weather -- weather at a named place (same server)
+
+Standard (inference and data, $0.25-$0.50):
+- POST /work/llm/analyze -- answer a question from text you supply, saying
+  so when the text does not contain the answer (Gemini)
+- POST /work/llm/extract -- named fields from text as JSON, null when not
+  stated (Gemini)
+- POST /work/llm/generate -- raw completion, your prompt and model choice
+  (Gemini; Claude via Vertex Model Garden once enabled)
+- POST /work/code/execute -- run Python in Google's own hosted sandbox
+- POST /work/image/generate -- one image from a text prompt (Imagen 4)
+- POST /work/speech/synthesize -- text to speech (Cloud Text-to-Speech)
+- POST /work/speech/transcribe -- speech to text, up to 60s/10MB (STT v2)
+- POST /work/data/query -- read-only BigQuery SQL, including Google's public
+  datasets, under a scan ceiling
+- POST /work/monitor/snapshot -- save a page as a baseline to check later
+- POST /work/monitor/check -- re-fetch a baselined page and get a change
+  summary
+
+Advanced (several providers, one completed result, $5.00):
+- POST /work/data/question -- a plain-language question about a BigQuery
+  table, answered with the SQL and the rows behind it
+- POST /work/research/brief -- read a web page and answer a question about it
+- POST /work/research/page_facts -- the fields you name from a web page, as
+  JSON
+- POST /work/research/web -- a live web search, read, and a cited answer
+- POST /work/verify/claims -- specific claims checked against specific
+  sources: supported / contradicted / unsupported, with the quote
+- POST /work/market/intel -- a live spot quote and prediction-market
+  probabilities on one subject, analysed together (market data, not advice)
+- POST /work/security/mcp_inspect -- probe a customer's MCP endpoint's
+  handshake: auth posture, protocol version, tools not marked read-only
+
+Premium ($10.00):
+- POST /work/data/forecast -- forecast a BigQuery time series (AI.FORECAST,
+  TimesFM, no training)
+- POST /work/data/anomalies -- detect anomalies in a BigQuery time series
+  (AI.DETECT_ANOMALIES)
+- POST /work/research/company -- a cited research brief on a company from
+  live web sources
+- POST /work/video/generate -- a short video from a text prompt (Veo, once
+  the operator has verified the model on this deployment)
+
+Same payment gate and the same guarantees as the audits: an
+unauthenticated call answers HTTP 402 with the price, requests are
+validated before any payment is read, and a call no provider could
+complete returns HTTP 502 with per-provider reasons and bills nothing.
+Input schemas and prices for every live worker are in
+/.well-known/agent.json and the /mcp tools/list.
 
 ## Payment and auth
 
 Up to three rails, all fail-closed (no valid credential/payment means no
 audit runs, and nothing partially executes on a rejected payment):
 
-1. Stripe API key -- `X-API-Key` header, issued with a human plan. Plans are
-   priced per site watched, not per scan; machine callers should use the
-   per-call rails below instead.
+1. API key -- `X-API-Key` header: a prepaid key bought through the MPP
+   top-up rail (a $0.50 block, spent at the per-call rates). There are no
+   subscriptions; machine callers should use the per-call rails below.
 2. x402 -- on-chain payment via the x402 protocol; verified and settled
    through a facilitator, never trusted client-side.
 3. MPP (Machine Payments Protocol) -- Stripe Shared Payment Tokens (fiat)
@@ -98,9 +199,8 @@ https://github.com/its-fortunatefolly/hubvibe/tree/main/wcag-audit-engine/integr
 
 ## Pricing
 
-Machine, per call (this is the product): $0.03 per single-dimension audit,
-$0.10 per bundle. No account, no minimum.
+Machine, per call (this is the product): $0.05 per single-dimension audit,
+$0.15 per bundle. No account, no minimum.
 
-Human plans, priced per site watched rather than per scan: $29.99 one-off
-report, $79/mo for 5 sites daily, $249/mo for 50 sites daily. See
-/.well-known/agent.json for the authoritative live pricing.
+There are no subscriptions: per call is the only price.
+See /.well-known/agent.json for the authoritative live pricing.

@@ -27,7 +27,7 @@ import httpx
 from langchain_core.tools import tool
 
 HUBVIBE_BASE_URL = os.environ.get(
-    "HUBVIBE_BASE_URL", "https://hubvibe-831480473793.us-south1.run.app"
+    "HUBVIBE_BASE_URL", "https://hubvibe-io.com"
 )
 
 
@@ -36,7 +36,7 @@ def hubvibe_audit_bundle(url: str) -> dict:
     """Run HubVibe's full site-compliance bundle (WCAG accessibility, SEO,
     security headers, and performance) against a live URL.
 
-    Costs $0.10 per call, billed to the configured HUBVIBE_API_KEY. Returns
+    Costs $0.15 per call, billed to the configured HUBVIBE_API_KEY. Returns
     a dict with `pass` (bool, true only if every dimension passed) and
     per-dimension results under `wcag`, `seo`, `security`, and
     `performance`, each with its own `pass` and `findings`.

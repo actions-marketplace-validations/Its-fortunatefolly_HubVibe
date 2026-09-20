@@ -4,7 +4,7 @@
 # the call sells for.
 #
 # This is the number the whole per-call business model rests on and it has
-# never been measured. At $0.03 a single audit and $0.10 a bundle, the gross
+# never been measured. At $0.05 a single audit and $0.15 a bundle, the gross
 # margin per call decides whether volume is the thing that makes money or the
 # thing that loses it faster. Every other traffic decision is downstream of it.
 #
@@ -28,7 +28,7 @@ set -uo pipefail
 PROJECT="${PROJECT:-resolver-time}"
 SERVICE="${SERVICE:-hubvibe}"
 REGION="${REGION:-us-south1}"
-BASE_URL="${BASE_URL:-https://hubvibe-831480473793.us-south1.run.app}"
+BASE_URL="${BASE_URL:-https://hubvibe-io.com}"
 ENDPOINT="bundle"
 TARGET_URL="${TARGET_URL:-https://example.com}"
 CALLS=10
@@ -42,8 +42,8 @@ CPU_RATE="${CPU_RATE:-0.000024}"   # per vCPU-second
 MEM_RATE="${MEM_RATE:-0.0000025}"  # per GiB-second
 REQ_RATE="${REQ_RATE:-0.40}"       # per million requests
 
-PRICE_BUNDLE="0.10"
-PRICE_SINGLE="0.03"
+PRICE_BUNDLE="0.15"
+PRICE_SINGLE="0.05"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -298,7 +298,7 @@ else:
 print()
 
 print("== margin ==")
-for label, price in (("bundle", 0.10), ("single audit", 0.03)):
+for label, price in (("bundle", 0.15), ("single audit", 0.05)):
     margin = price - chosen
     pct = (margin / price) * 100
     verdict = "WORKS" if margin > 0 else "LOSES MONEY ON EVERY CALL"
@@ -306,7 +306,7 @@ for label, price in (("bundle", 0.10), ("single audit", 0.03)):
 print()
 
 if chosen > 0:
-    for label, price in (("bundle", 0.10), ("single audit", 0.03)):
+    for label, price in (("bundle", 0.15), ("single audit", 0.05)):
         m = price - chosen
         if m > 0:
             calls_for_1m = 1_000_000 / m

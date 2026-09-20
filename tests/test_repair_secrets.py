@@ -49,8 +49,8 @@ case "$*" in
   *"run services describe"*)
     cat <<'J'
 {"spec":{"template":{"spec":{"containers":[{"env":[
- {"name":"CDP_API_KEY_SECRET","valueFrom":{"secretKeyRef":
-  {"name":"cdp-api-key-secret","key":"latest"}}}]}]}}}}
+ {"name":"GEMINI_API_KEY","valueFrom":{"secretKeyRef":
+  {"name":"gemini-api-key","key":"latest"}}}]}]}}}}
 J
     ;;
   *"versions list"*) printf '' ;;

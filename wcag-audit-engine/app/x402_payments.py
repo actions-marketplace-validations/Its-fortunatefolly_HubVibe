@@ -21,18 +21,26 @@ Requires, at deploy time:
                           processor's x402 facilitator endpoint)
 - X402_PAY_TO_ADDRESS    the wallet address that receives payment
 - X402_NETWORK           CAIP-2 network id (default: "eip155:8453", Base mainnet)
-- X402_PRICE             default: "$0.03"
+- X402_PRICE             default: "$0.05"
 
-Optional, and worth having: when STRIPE_SECRET_KEY is set and the pay-to
-address is a Stripe-custodied deposit address (scripts/x402-setup.py mints
-one), every settled payment is also recorded as a Stripe PaymentIntent in
-transaction_verification mode -- the pattern from Stripe's machine-payments
-sample. That is what makes on-chain revenue show up in the Stripe balance,
-reporting, and payouts instead of accumulating invisibly on an address.
-Recording failures never fail the payment; the money moved on-chain already.
+Where the money goes: X402_PAY_TO_ADDRESS is a self-custody Base wallet.
+Stripe does MPP, not x402 (owner's fact, 2026-09-01), so x402 revenue lands
+ON-CHAIN in that wallet and does not appear in the Stripe balance. The
+wallet is the counter. Do not read an unchanged Stripe balance as "no x402
+payments".
+
+Off by default: X402_STRIPE_MIRROR=1 enables recording each settled payment
+as a Stripe PaymentIntent in transaction_verification mode. That only works
+when the pay-to is a Stripe-custodied deposit address, which this deployment
+does not use -- against a self-custody wallet Stripe rejects every attempt,
+and the previous default-on behaviour would have logged a traceback saying
+"Stripe will not show it until this transaction hash is recorded" on every
+real payment. Recording failures never fail the payment either way; the
+money moved on-chain already.
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -46,10 +54,21 @@ from x402.http.utils import decode_payment_signature_header
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 from x402.schemas import ResourceConfig
 
+try:  # the Solana (SVM) mechanism ships in the x402[svm] extra
+    from x402.mechanisms.svm.exact.server import ExactSvmScheme as ExactSvmServerScheme
+except ImportError:  # pragma: no cover - the extra is pinned in requirements.txt
+    ExactSvmServerScheme = None
+
 _FACILITATOR_URL = os.environ.get("X402_FACILITATOR_URL")
 _PAY_TO_ADDRESS = os.environ.get("X402_PAY_TO_ADDRESS")
 _NETWORK = os.environ.get("X402_NETWORK", "eip155:8453")
-_PRICE = os.environ.get("X402_PRICE", "$0.03")
+# Optional second rail: USDC on Solana mainnet, into a Solana address the
+# owner holds. Advertised only when the address parses as a Solana public key
+# AND the facilitator lists `exact` on this network with a fee payer (the
+# facilitator's own key signs the transfer, so a client can build one).
+_SOLANA_PAY_TO_ADDRESS = os.environ.get("X402_SOLANA_PAY_TO_ADDRESS")
+_SOLANA_NETWORK = os.environ.get("X402_SOLANA_NETWORK", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")
+_PRICE = os.environ.get("X402_PRICE", "$0.05")
 
 # Headers sent with every facilitator call, as a JSON object, e.g.
 #   {"Authorization": "Bearer sk_live_..."}
@@ -61,10 +80,11 @@ _PRICE = os.environ.get("X402_PRICE", "$0.03")
 # so x402 could only ever have been switched on against a facilitator that
 # wanted no credentials at all.
 _FACILITATOR_AUTH_HEADERS = os.environ.get("X402_FACILITATOR_AUTH_HEADERS")
-
 # Coinbase CDP credentials. CDP takes precedence over the static headers
 # above when both are set, because it is the more specific configuration --
-# nobody sets a CDP key pair by accident.
+# nobody sets a CDP key pair by accident. Used ONLY against a Coinbase host
+# (see _auth_provider). CDP is the facilitator that lists a resource in the
+# x402 Bazaar, the index the official x402 SDKs read by default.
 _CDP_API_KEY_ID = os.environ.get("CDP_API_KEY_ID")
 _CDP_API_KEY_SECRET = os.environ.get("CDP_API_KEY_SECRET")
 
@@ -151,6 +171,45 @@ def is_configured() -> bool:
     return bool(_FACILITATOR_URL and _pay_to_is_usable())
 
 
+_solana_warned = False
+
+
+def _warn_solana_off(why: str) -> None:
+    global _solana_warned
+    if _solana_warned:
+        return
+    _solana_warned = True
+    logging.getLogger(__name__).warning(
+        "Solana rail OFF: %s (X402_SOLANA_PAY_TO_ADDRESS=%r). Base stays live.",
+        why, _SOLANA_PAY_TO_ADDRESS,
+    )
+
+
+def solana_configured() -> bool:
+    """A Solana pay-to this node can actually advertise: set, parses as a
+    32-byte public key, and is not the all-zero system key. Shape is not
+    ownership, same as the EVM address -- only an address the owner holds
+    belongs here. Off, with one warning, on anything else; Base is
+    unaffected either way.
+    """
+    if not _SOLANA_PAY_TO_ADDRESS:
+        return False
+    if ExactSvmServerScheme is None:
+        _warn_solana_off("the x402[svm] extra is not installed")
+        return False
+    try:
+        from solders.pubkey import Pubkey
+
+        key = Pubkey.from_string(_SOLANA_PAY_TO_ADDRESS.strip())
+    except Exception as exc:
+        _warn_solana_off(f"not a Solana public key ({type(exc).__name__})")
+        return False
+    if key == Pubkey.default():
+        _warn_solana_off("the all-zero system key cannot receive USDC")
+        return False
+    return True
+
+
 class _StaticAuthProvider:
     """Sends a fixed set of headers on every facilitator call.
 
@@ -159,12 +218,12 @@ class _StaticAuthProvider:
     key is the same on all four, so the same dict is returned for each.
 
     This deliberately does NOT cover facilitators that sign a fresh
-    credential per request (Coinbase CDP mints a short-lived JWT from an
-    Ed25519 key). Those need their own SDK's header generator, which the
-    library accepts via CreateHeadersAuthProvider -- see the README. Faking
-    it with a static header would produce a facilitator that rejects every
-    payment, which fails closed but silently, and that is the single worst
-    outcome for a payment rail.
+    credential per request. Those need their own header generator, which
+    the library accepts via CreateHeadersAuthProvider. Faking it with a
+    static header would produce a facilitator that rejects every payment,
+    which fails closed but silently, and that is the single worst outcome
+    for a payment rail. Coinbase CDP is that case and has its own provider
+    below; the default facilitator (PayAI) is keyless.
     """
 
     __slots__ = ("_headers",)
@@ -202,9 +261,9 @@ class _CdpAuthProvider:
     across endpoints. That is precisely why the x402 AuthProvider protocol
     asks for verify / settle / supported / bazaar separately.
 
-    CDP is the facilitator worth having: it settles on mainnet, and it is
-    what gets a resource listed in the x402 Bazaar, which is how agents find
-    a service by capability instead of by URL.
+    CDP is the facilitator worth having for discovery: it settles on mainnet,
+    and it is what lists a resource in the x402 Bazaar, which is how agents
+    find a service by capability instead of by URL.
     """
 
     __slots__ = ("_key_id", "_key_secret", "_host", "_base_path")
@@ -296,26 +355,19 @@ def _auth_provider():
     silently dropping credentials would leave x402 advertised and every
     payment rejected by the facilitator, which looks identical to "nobody is
     buying" and could go unnoticed indefinitely.
-
-    CDP credentials are used ONLY against a Coinbase host. The handoff bills
-    switching away from CDP as "one env var" -- point X402_FACILITATOR_URL at
-    a keyless facilitator and redeploy -- and that was not true while this
-    branch was unconditional: the CDP key pair stays mounted on the service,
-    so every call to the new facilitator went out signed with a JWT bound to
-    a host Coinbase never issued for. Whether that 401s or is ignored is the
-    third party's choice, not ours, and the failure mode if it 401s is the
-    worst one this file knows: x402 still advertised on every 402, every
-    payment rejected, indistinguishable from nobody buying. Ignoring the
-    credentials instead makes the documented one-variable swap actually work,
-    and says so in the log rather than deciding it silently.
     """
+    # CDP credentials are used ONLY against a Coinbase host. Switching to a
+    # keyless facilitator is documented as one env var (X402_FACILITATOR_URL),
+    # and that is only true if a CDP key pair left mounted on the box is
+    # ignored rather than sent to a host Coinbase never issued it for -- a
+    # 401 there means x402 advertised on every 402 and every payment
+    # rejected, indistinguishable from nobody buying. Ignored, and said so.
     if _CDP_API_KEY_ID and _CDP_API_KEY_SECRET:
         if _host_is_coinbase(_FACILITATOR_URL or ""):
             return _CdpAuthProvider(
                 _CDP_API_KEY_ID, _CDP_API_KEY_SECRET, _FACILITATOR_URL or ""
             )
         _warn_cdp_ignored(_FACILITATOR_URL or "")
-
     if not _FACILITATOR_AUTH_HEADERS:
         return None
     headers = json.loads(_FACILITATOR_AUTH_HEADERS)
@@ -327,6 +379,35 @@ def _auth_provider():
             'e.g. {"Authorization": "Bearer ..."}'
         )
     return _StaticAuthProvider(headers)
+
+
+class _FacilitatorClient(HTTPFacilitatorClient):
+    """The library's client, with a short timeout on the one call made under
+    the module lock.
+
+    initialize() fetches /supported synchronously, and _get_server() holds
+    _LOCK while it does, so every 402 being built waits behind it. With the
+    library's 30s default, a facilitator outage made every unpaid request
+    hang up to 30s -- the node down because a third party was. /supported is
+    a static document; 8s is generous. verify/settle keep the full timeout:
+    a settle legitimately waits for on-chain inclusion.
+    """
+
+    _SUPPORTED_TIMEOUT = float(os.environ.get("X402_SUPPORTED_TIMEOUT", "8"))
+
+    def _get_sync_client(self):
+        import httpx
+
+        return httpx.Client(timeout=self._SUPPORTED_TIMEOUT, follow_redirects=True)
+
+
+# After a failed initialize(), do not knock on the facilitator again for this
+# long. Without it, every request during an outage paid the connect timeout
+# under _LOCK, serially. During the window x402 is simply not advertised --
+# fail-closed, fast, and MPP stays on the 402.
+_SERVER_RETRY_SECONDS = float(os.environ.get("X402_FACILITATOR_RETRY_SECONDS", "15"))
+_server_failed_at: Optional[float] = None
+_server_failure: Optional[str] = None
 
 
 def _get_server() -> x402ResourceServer:
@@ -343,23 +424,43 @@ def _get_server() -> x402ResourceServer:
 
     The server is only cached after initialize() succeeds, so a facilitator
     that is briefly unreachable results in a retry on the next request
-    rather than a permanently poisoned server object.
+    rather than a permanently poisoned server object -- after a short
+    back-off, so an outage costs one timeout per window, not one per request.
     """
-    global _server
+    global _server, _server_failed_at, _server_failure
+    import time
+
     with _LOCK:
         if _server is None:
-            facilitator = HTTPFacilitatorClient(
+            if (
+                _server_failed_at is not None
+                and time.monotonic() - _server_failed_at < _SERVER_RETRY_SECONDS
+            ):
+                raise RuntimeError(
+                    f"facilitator {_FACILITATOR_URL} unreachable ({_server_failure}); "
+                    f"not retried for {_SERVER_RETRY_SECONDS:.0f}s"
+                )
+            facilitator = _FacilitatorClient(
                 FacilitatorConfig(url=_FACILITATOR_URL, auth_provider=_auth_provider())
             )
             server = x402ResourceServer(facilitator)
             server.register(_NETWORK, ExactEvmServerScheme())
-            server.initialize()
+            if solana_configured():
+                server.register(_SOLANA_NETWORK, ExactSvmServerScheme())
+            try:
+                server.initialize()
+            except Exception as exc:
+                _server_failed_at = time.monotonic()
+                _server_failure = f"{type(exc).__name__}: {exc}"
+                raise
+            _server_failed_at = None
+            _server_failure = None
             _server = server
         return _server
 
 
 def _get_requirements(price: str):
-    """Cached per price -- a $0.03 payment must never satisfy a $0.10
+    """Cached per price -- a single-audit payment must never satisfy a bundle
     challenge, so each price gets its own requirements object rather than
     sharing one global cache across every route."""
     with _LOCK:
@@ -371,31 +472,185 @@ def _get_requirements(price: str):
                 pay_to=_PAY_TO_ADDRESS,
                 price=price,
             )
-            _requirements_cache[price] = server.build_payment_requirements(config)
+            requirements = list(server.build_payment_requirements(config))
+            if solana_configured():
+                try:
+                    requirements.extend(server.build_payment_requirements(ResourceConfig(
+                        scheme="exact",
+                        network=_SOLANA_NETWORK,
+                        pay_to=_SOLANA_PAY_TO_ADDRESS.strip(),
+                        price=price,
+                    )))
+                except Exception as exc:
+                    # The facilitator does not list Solana. The rail is not
+                    # advertised either (_solana_accepts gates on the same
+                    # fact), so no payer is ever sent here for it.
+                    _warn_solana_off(
+                        f"the facilitator cannot build Solana requirements "
+                        f"({type(exc).__name__}: {exc})"
+                    )
+            _requirements_cache[price] = requirements
         return _requirements_cache[price]
 
 
-def payment_required_body(price: Optional[str] = None) -> dict:
-    """The x402 half of a 402 body, or `{}` when x402 can't actually settle.
+def _get_requirements_v1(price: str, resource_url: Optional[str]):
+    """The requirements a **v1** payer signed against, as the library's
+    `PaymentRequirementsV1` -- the same values `accepts_entry()` advertises.
 
-    Returning the x402 shape unconditionally -- which is what this used to do
-    -- actively misleads a paying agent on a deployment where x402 isn't
-    configured: it advertises X-PAYMENT as an accepted header and then names
-    `payTo: null` as the recipient. A conforming client either hard-errors or
-    builds a payment to a null address, and either way the caller can't buy
-    and we can't sell. If x402 isn't live here, say nothing about x402 rather
-    than something false; the MPP challenges on the same 402 still give the
-    caller a real way to pay.
+    A facilitator routes a verify/settle request by the PAYLOAD's version and
+    hands a v1 payload to its v1 verifier, which reads `maxAmountRequired`
+    and the legacy network name ("base") off the requirements. Until this
+    existed the node advertised v1 in every 402 body and then verified every
+    payment, v1 included, against the v2 requirements object (`amount`,
+    `eip155:8453`). The facilitator saw a v1 payload beside v2-shaped
+    requirements and refused it -- so a pre-v2 client signed a valid
+    authorization for the right amount to the right wallet and was 402'd
+    every time. Found by the 2026-09-06 audit's live harness; invisible to
+    the simulation, which only ever paid via v2.
+
+    Raises when v1 is not offered here (facilitator does not list the legacy
+    name); the caller fails closed on that, exactly as for a v2 mismatch.
     """
+    from x402.schemas.v1 import PaymentRequirementsV1
+
+    entry = accepts_entry(price=price, resource_url=resource_url)
+    if entry is None:
+        raise RuntimeError(
+            "x402 v1 is not offered on this node (the facilitator does not "
+            "list the legacy network name), so a v1 payment cannot be verified"
+        )
+    return PaymentRequirementsV1.model_validate(entry)
+
+
+def _requirement_for(payload, requirements):
+    """The advertised requirement the payer actually signed for, by network.
+
+    With more than one rail in `accepts`, a Solana payer's payload has to be
+    compared, verified and settled against the Solana requirement, not
+    whichever entry came first. Falls back to the first entry (the primary
+    rail) when the payload names no network this node advertised; the
+    mismatch check that follows then says so.
+    """
+    try:
+        if getattr(payload, "x402_version", 2) == 1:
+            network = payload.get_network()
+        else:
+            network = payload.accepted.network
+    except Exception:
+        return requirements[0]
+    for requirement in requirements:
+        if getattr(requirement, "network", None) == network:
+            return requirement
+    return requirements[0]
+
+
+def _payload_mismatch(payload, requirement, server) -> Optional[str]:
+    """Why this payload does not pay for THIS requirement, or None if it does.
+
+    The facilitator is asked to verify a payment against the requirements the
+    node built for the route being called. It compares the signature to those
+    requirements, so a single-audit authorization sent to the bundle route fails there
+    -- on every standard facilitator. This check is the node's own copy of
+    that comparison, run BEFORE the round trip: defence in depth against a
+    facilitator that is lenient about `value`, and a clearer reason for the
+    payer than whatever a facilitator's error vocabulary happens to be.
+
+    v2 delegates to the library's `find_matching_requirements` (every
+    server-declared field, `extra` as a subset). v1 has no `accepted` block,
+    so the authorization itself is compared: recipient, and value at least
+    the advertised amount (v1 facilitators reject `value < maxAmountRequired`).
+    """
+    try:
+        if getattr(payload, "x402_version", 2) == 1:
+            if payload.get_scheme() != requirement.scheme:
+                return "scheme does not match the challenge"
+            if payload.get_network() != requirement.network:
+                return "network does not match the challenge"
+            auth = (getattr(payload, "payload", None) or {}).get("authorization") or {}
+            if str(auth.get("to", "")).lower() != str(requirement.pay_to).lower():
+                return "recipient does not match the challenge"
+            if int(auth.get("value", -1)) < int(requirement.max_amount_required):
+                return "amount is below the challenge's maxAmountRequired"
+            return None
+        matched = server.find_matching_requirements([requirement], payload)
+        if matched is None:
+            return "accepted requirements do not match the challenge (amount, asset, recipient or network)"
+        return None
+    except Exception as exc:
+        return f"could not compare the payment to the challenge ({type(exc).__name__}: {exc})"
+
+
+# Why the LAST payment was refused, per thread, so the 402 that answers it
+# can say so. Set by verify_only_sync on every fail-closed return and cleared
+# on success; read by the route right after a None. Thread-local because the
+# verify and the 402 that follows it run on the same worker thread, and a
+# global would let one payer's reason leak into another's response.
+_rejection = threading.local()
+
+# Reasons that are the NODE's or the facilitator's fault, not the payer's.
+# The 402 for these carries Retry-After: the signature was fine, try again.
+_TRANSIENT_REASONS = frozenset({"facilitator_unavailable"})
+
+
+def _note_rejection(reason: Optional[str], detail: Optional[str] = None) -> None:
+    _rejection.last = (reason, detail) if reason else None
+
+
+def last_rejection():
+    """(reason, detail) for the payment this thread just refused, or None.
+
+    `reason` is a short machine token -- the facilitator's own
+    `invalid_reason` where it gave one (`insufficient_funds`,
+    `invalid_exact_evm_payload_authorization_value_mismatch`, ...), else one
+    of this node's: `invalid_payment_payload`, `payment_replayed`,
+    `payment_mismatch`, `facilitator_unavailable`. `detail` is a sentence.
+    """
+    return getattr(_rejection, "last", None)
+
+
+def rejection_is_transient(reason: Optional[str]) -> bool:
+    return reason in _TRANSIENT_REASONS
+
+
+def discovery_offer(price: Optional[str] = None) -> dict:
+    """The x402 rail as one `x-payment-info` offer for openapi.json, or {}.
+
+    MPP tooling discovers paid endpoints from the OpenAPI document, and the
+    same document is what any agent that reads `/openapi.json` (agent.json
+    points at it) sees. Until this existed the offers there came only from
+    the MPP rails, so on an x402-only deploy every paid route read as free --
+    the "tollbooth whose own directory says no tolls here" failure, back for
+    the rail that actually earns. Gated exactly like the 402: no facilitator
+    support for either protocol version, no offer.
+    """
+    resolved = price or _PRICE
     if not is_configured():
         return {}
+    try:
+        priced = _priced_asset(resolved)
+    except Exception:
+        return {}
+    versions = []
+    if accepts_entry(price=resolved) is not None:
+        versions.append(1)
+    if payment_required_v2(price=resolved) is not None:
+        versions.append(2)
+    if not versions:
+        return {}
     return {
-        "x402Version": 1,
+        "method": "x402",
         "scheme": "exact",
         "network": _NETWORK,
-        "price": price or _PRICE,
+        "asset": priced.asset,
+        "amount": priced.amount,
+        "currency": "USDC",
         "payTo": _PAY_TO_ADDRESS,
-        "accepted_payment_header": "X-PAYMENT",
+        "x402Versions": versions,
+        "detail": (
+            "Sign an EIP-3009 USDC authorization for `amount` to `payTo` and "
+            "send it as PAYMENT-SIGNATURE (v2) or X-PAYMENT (v1); the 402 "
+            "carries the full challenge."
+        ),
     }
 
 
@@ -545,7 +800,7 @@ _SERVICE_TAGS = ["accessibility", "wcag", "seo", "security", "performance"]
 
 
 def _priced_asset(price: str):
-    """Resolve "$0.03" to the concrete asset, atomic amount and EIP-712 extra.
+    """Resolve a price like "$0.05" to the asset, atomic amount and EIP-712 extra.
 
     Done locally through the scheme's own price parser rather than through the
     facilitator, so building a challenge never depends on the facilitator being
@@ -593,6 +848,12 @@ def accepts_entry(price: Optional[str] = None, resource_url: Optional[str] = Non
     network = _V1_NETWORK_NAMES.get(_NETWORK)
     if network is None:
         return None
+    # Only offer v1 if the facilitator will take a v1 payment under the
+    # legacy name. The symmetric case of the v2 gate: a v1-only body against
+    # a v2-only facilitator is a signature for a network the node cannot
+    # route.
+    if not _facilitator_supports(1, network):
+        return None
     return {
         "scheme": "exact",
         "network": network,
@@ -624,11 +885,263 @@ def _warn_unpayable_challenge(exc: Exception) -> None:
     )
 
 
+_unsupported_version_warned: set = set()
+
+
+def _warn_version_unsupported(version: int, network: str, why: str) -> None:
+    key = (version, network)
+    if key in _unsupported_version_warned:
+        return
+    _unsupported_version_warned.add(key)
+    logging.getLogger(__name__).warning(
+        "x402 v%s on %s will NOT be advertised: %s (facilitator=%s). A client "
+        "offered this version would sign a payment this node cannot verify, "
+        "and the failure would be a bare 402 with the facilitator never called.",
+        version, network, why, _FACILITATOR_URL,
+    )
+
+
+def _facilitator_supports(version: int, network: str) -> bool:
+    """Will the facilitator verify an `exact` payment of this x402 version on
+    this network? Read off its /supported -- cached by initialize() -- through
+    the library's own lookup, wildcards included.
+
+    Found by simulation, not by reading. Against a facilitator whose
+    /supported lists only the legacy v1 name ("base"), this node still sent
+    the v2 PAYMENT-REQUIRED header naming eip155:8453. A v2-capable client
+    took that offer and signed for eip155:8453; the node then raised
+    SchemeNotFoundError before the facilitator was ever called, and failed
+    closed into a bare 402 -- every time, whatever the wallet held. That is
+    the exact shape of the two rejected live attempts.
+
+    Advertising a version the node cannot verify is the same fault as
+    advertising a recipient that cannot receive. Fail-closed: any exception,
+    an unreachable facilitator included, is "no". A challenge nobody can pay
+    is worse than no challenge, because it reads as nobody buying.
+    """
+    try:
+        server = _get_server()
+        kind = server.get_supported_kind(version, network, "exact")
+        # Every verification, whichever version the client used, builds its
+        # requirements under the CAIP-2 name (_get_requirements ->
+        # build_payment_requirements(network=_NETWORK)), and the library only
+        # does that when the facilitator's /supported lists that exact name:
+        # ExactEvmServerScheme.parse_price("$0.05", "base") raises
+        # "Unsupported network format". So a facilitator that lists only the
+        # legacy name can be offered nothing -- not even v1 -- because the
+        # node could take the signature and never build the thing to verify
+        # it against. Simulated: v1 offered, v1 paid, SchemeNotFoundError
+        # for eip155:8453 before the facilitator was called.
+        caip2_listed = any(
+            server.get_supported_kind(v, _NETWORK, "exact") is not None for v in (1, 2)
+        )
+    except Exception as exc:
+        _warn_version_unsupported(version, network, f"{type(exc).__name__}: {exc}")
+        return False
+    if kind is None:
+        _warn_version_unsupported(version, network, "not in the facilitator's /supported")
+        return False
+    if not caip2_listed:
+        _warn_version_unsupported(
+            version, network,
+            f"the facilitator lists {network!r} but not {_NETWORK!r}, and this "
+            f"server library can only build requirements under the CAIP-2 name",
+        )
+        return False
+    return True
+
+
+def _facilitator_transfer_method(version: int, network: str) -> Optional[str]:
+    """The `assetTransferMethod` the facilitator declares for this kind, if any.
+
+    Read off the same cached /supported the version gate uses, so the answer is
+    the facilitator's own word rather than ours.
+    """
+    try:
+        kind = _get_server().get_supported_kind(version, network, "exact")
+    except Exception:
+        return None
+    if kind is None:
+        return None
+    return (getattr(kind, "extra", None) or {}).get("assetTransferMethod")
+
+
+def _solana_accepts(price: str) -> list:
+    """The Solana USDC rail, when it can actually be paid: the owner set a
+    valid Solana address, the facilitator lists `exact` on Solana mainnet,
+    and it declares the fee payer a client needs to build the transfer.
+
+    Both facilitators this node has used list Solana first among their
+    networks and their indexes are full of Solana-paid resources. A
+    Base-only challenge sends every Solana-wallet agent away unpaid, which
+    from this side is indistinguishable from nobody buying. Same discipline
+    as every other rail: not advertised unless it can settle.
+    """
+    if not solana_configured() or not _facilitator_supports(2, _SOLANA_NETWORK):
+        return []
+    try:
+        from x402.schemas import PaymentRequirements
+
+        kind = _get_server().get_supported_kind(2, _SOLANA_NETWORK, "exact")
+        fee_payer = (getattr(kind, "extra", None) or {}).get("feePayer")
+        if not fee_payer:
+            _warn_solana_off("the facilitator lists Solana but declares no feePayer")
+            return []
+        parsed = ExactSvmServerScheme().parse_price(price, _SOLANA_NETWORK)
+        return [
+            PaymentRequirements(
+                scheme="exact",
+                network=_SOLANA_NETWORK,
+                asset=parsed.asset,
+                amount=parsed.amount,
+                payTo=_SOLANA_PAY_TO_ADDRESS.strip(),
+                maxTimeoutSeconds=_MAX_TIMEOUT_SECONDS,
+                extra={**(parsed.extra or {}), "feePayer": fee_payer},
+            )
+        ]
+    except Exception as exc:
+        _warn_solana_off(f"could not build the Solana rail ({type(exc).__name__}: {exc})")
+        return []
+
+
+def _v2_accepts(priced, price: Optional[str] = None):
+    """Every `exact` rail on this network the facilitator will actually settle.
+
+    The default rail is whatever the scheme's own asset table picks. For Base
+    mainnet USDC that is EIP-3009 `transferWithAuthorization`, which the token
+    verifies with a plain `ecrecover` and no ERC-1271 fallback -- so it is
+    payable ONLY by a wallet whose signature recovers to the payer address.
+    A plain EOA qualifies. A Coinbase Base Account does not: it is an EIP-7702
+    account that signs through its delegate, and the settlement simulation
+    reverts. That is one rejected payment for every smart-account wallet on
+    Base, which is most of them, and it looks from this side like nobody is
+    buying.
+
+    Permit2 verifies through ERC-1271, so it is the rail those wallets can pay
+    on. It is offered as an ADDITIONAL entry, never a replacement: Permit2
+    needs a prior token approval that a fresh agent wallet will not have, so
+    taking EIP-3009 away would simply move the outage to the other half of the
+    market. Offering both is what makes the tollbooth payable by both.
+
+    Gated on the facilitator declaring the method, for the same reason every
+    other rail here is gated: a rail nobody can settle is worse than no rail.
+    """
+    from x402.schemas import PaymentRequirements
+
+    def rail(extra):
+        return PaymentRequirements(
+            scheme="exact",
+            network=_NETWORK,
+            asset=priced.asset,
+            amount=priced.amount,
+            payTo=_PAY_TO_ADDRESS,
+            maxTimeoutSeconds=_MAX_TIMEOUT_SECONDS,
+            extra=extra,
+        )
+
+    default_extra = dict(priced.extra or {})
+    accepts = [rail(default_extra)]
+    offered = default_extra.get("assetTransferMethod")
+    declared = _facilitator_transfer_method(2, _NETWORK)
+    if declared and declared != offered:
+        accepts.append(rail({**default_extra, "assetTransferMethod": declared}))
+    if price:
+        accepts.extend(_solana_accepts(price))
+    return accepts
+
+
+def payment_required_v2(
+    price: Optional[str] = None,
+    resource_url: Optional[str] = None,
+    description: Optional[str] = None,
+    extensions: Optional[dict] = None,
+    error: Optional[str] = None,
+):
+    """The x402 **v2** challenge as the library's `PaymentRequired` model, or
+    None when this node cannot take a v2 payment right now.
+
+    One builder for every transport. The HTTP 402 carries it base64-encoded in
+    the `PAYMENT-REQUIRED` header (payment_required_header); the MCP paywall
+    carries the same object as JSON in the tool result's `structuredContent`
+    (payment_required_v2_dict). Two hand-built copies of the challenge would
+    be two places for the price, the recipient or the network to drift.
+
+    This is also the only place a service can name itself for the index:
+    `ResourceInfo.service_name` and `.tags` are what an agent shopping the
+    Bazaar by capability matches against. In the v1 body there is no field
+    for either, so a v1-only node is at best an anonymous row.
+
+    Never raises: any failure is logged once and answered with None, so a
+    caller can still send the v1 body, which is still payable.
+    """
+    if not is_configured():
+        return None
+    # Only offer v2 if the facilitator will take a v2 payment on this network.
+    # Otherwise a v2 client signs for a network the node cannot verify.
+    if not _facilitator_supports(2, _NETWORK):
+        return None
+    resolved = price or _PRICE
+    try:
+        from x402.schemas import PaymentRequired, ResourceInfo
+
+        priced = _priced_asset(resolved)
+        return PaymentRequired(
+            x402Version=2,
+            # "payment_required" on a fresh challenge; the refusal reason when
+            # this 402 answers a payment that was tried and rejected, so a
+            # v2 client that reads only the header learns why too.
+            error=error or "payment_required",
+            resource=ResourceInfo(
+                url=resource_url or "",
+                description=description or "HubVibe site audit",
+                mimeType="application/json",
+                serviceName=_SERVICE_NAME,
+                tags=list(_SERVICE_TAGS),
+            ),
+            accepts=_v2_accepts(priced, resolved),
+            extensions=extensions or None,
+        )
+    except Exception as exc:
+        # Same trade as the Bazaar extension: never let the richer path break
+        # the challenge. A v1 body still goes out and is still payable.
+        _warn_unpayable_challenge(exc)
+        return None
+
+
+def payment_required_v2_dict(
+    price: Optional[str] = None,
+    resource_url: Optional[str] = None,
+    description: Optional[str] = None,
+    extensions: Optional[dict] = None,
+    error: Optional[str] = None,
+) -> dict:
+    """The v2 challenge as the wire-shaped dict (camelCase, no nulls), or {}.
+
+    This is exactly what the x402 MCP server wrapper puts in a paywalled
+    tool result's `structuredContent`, and exactly what the x402 MCP client
+    parses back out of it (`parse_payment_required` on the dict). Same
+    serialisation as the header path -- `by_alias=True, exclude_none=True` --
+    so a facilitator that re-marshals the echoed `resource` sees no nulls.
+    """
+    challenge = payment_required_v2(
+        price=price, resource_url=resource_url, description=description,
+        extensions=extensions, error=error,
+    )
+    if challenge is None:
+        return {}
+    try:
+        return challenge.model_dump(by_alias=True, exclude_none=True)
+    except Exception as exc:
+        _warn_unpayable_challenge(exc)
+        return {}
+
+
 def payment_required_header(
     price: Optional[str] = None,
     resource_url: Optional[str] = None,
     description: Optional[str] = None,
     extensions: Optional[dict] = None,
+    error: Optional[str] = None,
 ) -> dict:
     """The x402 **v2** challenge, as the `PAYMENT-REQUIRED` header, or `{}`.
 
@@ -637,48 +1150,96 @@ def payment_required_header(
     without it, every v2 client is served the v1 path whether or not it wants
     it, and the v2 `extensions` slot (where the Bazaar discovery record
     actually belongs in v2) has nowhere to live.
-
-    This is also the only place a service can name itself for the index:
-    `ResourceInfo.service_name` and `.tags` are what an agent shopping the
-    Bazaar by capability matches against. In the v1 body there is no field
-    for either, so a v1-only node is at best an anonymous row.
     """
-    if not is_configured():
+    challenge = payment_required_v2(
+        price=price, resource_url=resource_url, description=description,
+        extensions=extensions, error=error,
+    )
+    if challenge is None:
         return {}
-    resolved = price or _PRICE
     try:
         from x402.http.utils import encode_payment_required_header
-        from x402.schemas import PaymentRequired, PaymentRequirements, ResourceInfo
 
-        priced = _priced_asset(resolved)
-        challenge = PaymentRequired(
-            x402Version=2,
-            error="payment_required",
-            resource=ResourceInfo(
-                url=resource_url or "",
-                description=description or "HubVibe site audit",
-                mimeType="application/json",
-                serviceName=_SERVICE_NAME,
-                tags=list(_SERVICE_TAGS),
-            ),
-            accepts=[
-                PaymentRequirements(
-                    scheme="exact",
-                    network=_NETWORK,
-                    asset=priced.asset,
-                    amount=priced.amount,
-                    payTo=_PAY_TO_ADDRESS,
-                    maxTimeoutSeconds=_MAX_TIMEOUT_SECONDS,
-                    extra=priced.extra,
-                )
-            ],
-            extensions=extensions or None,
-        )
         return {"PAYMENT-REQUIRED": encode_payment_required_header(challenge)}
     except Exception as exc:
-        # Same trade as the Bazaar extension: never let the richer path break
-        # the challenge. A v1 body still goes out and is still payable.
         _warn_unpayable_challenge(exc)
+        return {}
+
+
+# The keys the x402 MCP transport uses, read off the library
+# (x402.mcp.constants) rather than recalled. A payment rides in the tool
+# call's `params._meta["x402/payment"]`; the settlement receipt rides back in
+# the result's `_meta["x402/payment-response"]`. There is no HTTP header on
+# this path: an MCP client has no access to the transport's headers at all.
+MCP_PAYMENT_META_KEY = "x402/payment"
+MCP_PAYMENT_RESPONSE_META_KEY = "x402/payment-response"
+
+
+def payment_header_from_meta(value) -> Optional[str]:
+    """Turn the `_meta["x402/payment"]` value of an MCP tool call into the
+    base64 form the header path verifies, or None when there is nothing there.
+
+    The official x402 MCP client sends the PaymentPayload as a JSON object
+    (`payload.model_dump(by_alias=True)`); the official server also accepts a
+    JSON string. Both are re-encoded exactly the way a `PAYMENT-SIGNATURE`
+    header is encoded (`safe_base64_encode(json)`), so ONE verify path --
+    nonce ledger, facilitator loop, logging, all of it -- serves both
+    transports. A second verify implementation for MCP would be a second
+    place for the replay guard to be forgotten.
+
+    A string that is not JSON is passed through untouched, on the assumption
+    it is already the base64 header form; the decoder fails closed on it if
+    it is not. Never raises.
+    """
+    try:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return _encode_payment_json(json.dumps(value))
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            if stripped[0] in "{[":
+                json.loads(stripped)  # must be a JSON document, or fall through
+                return _encode_payment_json(stripped)
+            return stripped
+    except Exception:
+        return None
+    return None
+
+
+def _encode_payment_json(document: str) -> str:
+    from x402.http.utils import safe_base64_encode
+
+    return safe_base64_encode(document)
+
+
+def receipt_meta(pending) -> dict:
+    """The x402 settlement receipt as an MCP result `_meta` entry, or {}.
+
+    The MCP counterpart of receipt_headers(): the official x402 MCP server
+    puts the facilitator's SettleResponse under `_meta["x402/payment-response"]`
+    of the CallToolResult, and the official client reads it from there
+    (`extract_payment_response_from_meta`). Without it an MCP payer gets an
+    audit and no transaction hash -- the same bookkeeping gap the header
+    receipt closed for HTTP callers.
+
+    Same contract as receipt_headers: nothing on a refused or absent
+    settlement (a receipt there would be a forged proof of payment), and it
+    never raises -- the money has moved by the time this runs.
+    """
+    result = getattr(pending, "settle_result", None)
+    if not _has_receipt(result):
+        return {}
+    try:
+        return {MCP_PAYMENT_RESPONSE_META_KEY: result.model_dump(by_alias=True, exclude_none=True)}
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "x402 settled but the MCP receipt could not be serialised (%s: %s); "
+            "the tool result is delivered without _meta.",
+            type(exc).__name__, exc,
+        )
         return {}
 
 
@@ -694,37 +1255,372 @@ class PendingPayment:
     audit that ran" true for machine payers, not just for subscribers.
     """
 
-    __slots__ = ("payload", "requirements", "price")
+    __slots__ = ("payload", "requirements", "price", "settle_result",
+                 "settle_state", "settle_error")
 
     def __init__(self, payload, requirements, price: str):
         self.payload = payload
         self.requirements = requirements
         self.price = price
+        # The facilitator's SettleResponse once settle_sync has an answer
+        # worth handing the payer (settled, or pending with a transaction).
+        self.settle_result = None
+        # What settle_sync concluded: "settled", "pending" (the facilitator
+        # broadcast a transaction it has not yet confirmed), "unknown" (the
+        # facilitator did not answer in time -- the money MAY have moved),
+        # "refused" (it answered no: not charged). None until settle runs.
+        self.settle_state = None
+        # WHY, in one short line, for the payer -- not just for our log.
+        # The reason existed inside this process for a few milliseconds
+        # and was discarded, so a payer whose settle failed got the same
+        # generic sentence whether the facilitator refused, never
+        # answered, or was never reached. Those need different actions,
+        # and only the node knows which one happened.
+        self.settle_error = None
 
 
-def verify_only_sync(payment_header: str, price: Optional[str] = None):
+def _short(text, limit: int = 180) -> str:
+    """One line, bounded, safe to put on a response body.
+
+    A facilitator's error text is someone else's string: it can be a page of
+    HTML or contain newlines that would break a header or a log line.
+    """
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def _suffix(message) -> str:
+    return " (%s)" % message if message else ""
+
+
+def _has_receipt(result) -> bool:
+    """A settle response worth handing the payer: settled, OR pending with a
+    transaction hash. A `settlement_pending` answer that names a transaction
+    is money in flight -- withholding that hash told the payer 'not charged'
+    while USDC landed in the owner's wallet. Nothing on a refusal."""
+    if result is None:
+        return False
+    if getattr(result, "success", False):
+        return True
+    # Only the facilitator's own "pending" vocabulary counts: a refusal that
+    # happens to name a (reverted) transaction is still a refusal.
+    return (
+        getattr(result, "error_reason", None) == "settlement_pending"
+        and _transaction_of(result) is not None
+    )
+
+
+def _transaction_of(result) -> Optional[str]:
+    """The transaction hash on a settle response, or None. A real
+    SettleResponse carries "" when there is none; only a non-empty string
+    counts, so a refusal is never mistaken for a broadcast."""
+    transaction = getattr(result, "transaction", None)
+    if isinstance(transaction, str) and transaction.strip():
+        return transaction
+    return None
+
+
+def receipt_headers(pending) -> dict:
+    """The x402 settlement receipt, as response headers, or {}.
+
+    Spec step 10-11: after settling, the resource server returns the
+    facilitator's settle response to the client in `PAYMENT-RESPONSE` (v2;
+    `X-PAYMENT-RESPONSE` for v1 clients -- the library's client reads either).
+    It carries the transaction hash, the network and the payer. Without it a
+    paying agent has proof of nothing: it sent a signature, got an audit, and
+    has no on-chain reference to reconcile against its wallet. Found by
+    `scripts/simulate-paid-call.py`, which was the first thing to look at the
+    headers of a paid 200 -- every earlier test stopped at the status code.
+
+    Sent under both names because the node accepts both payment headers
+    (X-PAYMENT and PAYMENT-SIGNATURE) and does not track which the caller
+    used; an extra header costs nothing and a missing one costs the receipt.
+
+    Never raises and never withholds the audit: {} on anything unexpected.
+    The money has moved by the time this runs; a receipt that cannot be
+    encoded is a bookkeeping gap, not a reason to fail the delivery.
+    """
+    result = getattr(pending, "settle_result", None)
+    if not _has_receipt(result):
+        return {}
+    try:
+        from x402.http.utils import encode_payment_response_header
+
+        encoded = encode_payment_response_header(result)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "x402 settled but the receipt could not be encoded (%s: %s); the "
+            "audit is delivered without a PAYMENT-RESPONSE header.",
+            type(exc).__name__, exc,
+        )
+        return {}
+    return {"PAYMENT-RESPONSE": encoded, "X-PAYMENT-RESPONSE": encoded}
+
+
+def _log_rejection(stage: str, price: Optional[str], *, result=None, exc=None) -> None:
+    """Say WHY a payment failed, at a level Cloud Run keeps.
+
+    Every fail-closed return in this module used to be a bare `return None`
+    or `return False`. Correct as a contract, and it discarded the one thing
+    that matters when a payment is refused: the reason. The first real paid
+    call against the deployed node came back as a plain 402 re-challenge --
+    the facilitator's `invalid_reason`, or the exception that stopped the
+    verify call from ever reaching it, existed for a few milliseconds inside
+    this process and was thrown away. The Cloud Run log had nothing; the
+    owner had the word "rejected" and nowhere to look next.
+
+    That is the #61 failure shape one layer in: from the outside a bounced
+    payment is indistinguishable from nobody buying, and this made it
+    indistinguishable from the inside too.
+
+    WARNING rather than ERROR because a rejected payment is the facilitator
+    working -- it is the outcome that is loud, not necessarily wrong. Never
+    raises: a logging failure must not turn a refused payment into a 500.
+    """
+    try:
+        log = logging.getLogger(__name__)
+        if exc is not None:
+            log.warning(
+                "x402 %s FAILED before the facilitator could answer "
+                "(facilitator=%s price=%s): %s: %s",
+                stage, _FACILITATOR_URL, price, type(exc).__name__, exc,
+            )
+            return
+        log.warning(
+            "x402 %s REJECTED by the facilitator (facilitator=%s price=%s): "
+            "reason=%s message=%s payer=%s",
+            stage, _FACILITATOR_URL, price,
+            getattr(result, "invalid_reason", None),
+            getattr(result, "invalid_message", None),
+            getattr(result, "payer", None),
+        )
+    except Exception:
+        pass
+
+
+# Every facilitator coroutine runs on ONE long-lived event loop, on its own
+# thread, for the life of the process.
+#
+# Why not asyncio.run() per call: the x402 facilitator client keeps a single
+# httpx.AsyncClient and reuses its pooled keep-alive connections. A pooled
+# connection is bound to the event loop that opened it. With a fresh loop per
+# verify/settle, the second call to reuse a connection raised "Event loop is
+# closed" or "... is bound to a different event loop" -- measured against a
+# keep-alive stub facilitator at 16 concurrent payers: 56 of 96 payments
+# rejected by THIS node, facilitator never asked. Every production facilitator
+# speaks keep-alive; the sequential simulation only passed because its stub
+# closed each connection. That failure has the #61 shape exactly: from
+# outside, more than half the paying agents look like nobody buying.
+#
+# One loop also settles #83 (a worker thread that already hosts Playwright's
+# loop) for good: the caller's thread never runs asyncio at all.
+_FACILITATOR_CALL_TIMEOUT = float(os.environ.get("X402_FACILITATOR_CALL_TIMEOUT", "45"))
+_io_loop: Optional[asyncio.AbstractEventLoop] = None
+_io_loop_lock = threading.Lock()
+
+
+def _facilitator_loop() -> asyncio.AbstractEventLoop:
+    global _io_loop
+    with _io_loop_lock:
+        if _io_loop is None or _io_loop.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(
+                target=loop.run_forever, name="x402-facilitator-io", daemon=True
+            ).start()
+            _io_loop = loop
+        return _io_loop
+
+
+def _run_coro_sync(coro, timeout: Optional[float] = None):
+    """Run a facilitator coroutine on the dedicated loop and wait for it.
+
+    Safe from any thread, including one that already hosts a running loop
+    (the #83 case), because nothing here touches the caller's loop. Bounded:
+    a facilitator that never answers must not hold a worker thread forever.
+    """
+    future = asyncio.run_coroutine_threadsafe(coro, _facilitator_loop())
+    try:
+        return future.result(timeout if timeout is not None else _FACILITATOR_CALL_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        raise TimeoutError(
+            f"facilitator call exceeded {_FACILITATOR_CALL_TIMEOUT:.0f}s"
+        ) from None
+
+
+# ---------------------------------------------------------------------------
+# Replay guard.
+#
+# verify does not consume anything: the facilitator checks the signature and
+# the balance and says "valid". Only settle spends the EIP-3009 nonce, and
+# settle runs AFTER the audit (so a failed audit is never charged). That
+# leaves a window: send the same signed payment N times at once, every copy
+# verifies, every copy gets an audit, the first settle succeeds and the rest
+# fail -- N-1 audits for one payment, each logged as "delivered, not paid".
+# And a payer whose settle failed once could re-send the same signature
+# forever: verify says valid again, another audit, another failed settle.
+#
+# So a nonce is admitted once per node. Kept from first verify until the
+# authorization's own validity window has passed (the facilitator rejects it
+# after that anyway), and dropped only when verify itself fails -- a retry
+# after a facilitator hiccup is legitimate and must go through.
+#
+# Per instance, in memory. Two instances can each admit the same nonce once;
+# the facilitator's own nonce check still makes the second SETTLE fail, so
+# the exposure is one unpaid audit per extra instance, not unbounded.
+# ---------------------------------------------------------------------------
+_NONCE_TTL_SECONDS = _MAX_TIMEOUT_SECONDS + 60
+_nonces: dict = {}
+_nonces_lock = threading.Lock()
+
+
+def _payment_nonce(payload) -> Optional[str]:
+    """The EIP-3009 nonce inside an `exact` payload, or None for other shapes."""
+    try:
+        inner = getattr(payload, "payload", None) or {}
+        auth = inner.get("authorization") or {}
+        nonce = auth.get("nonce")
+        return str(nonce).lower() if nonce else None
+    except Exception:
+        return None
+
+
+def _admit_nonce(nonce: Optional[str]) -> bool:
+    """True the first time a nonce is seen; False on every replay."""
+    import time
+
+    if nonce is None:
+        return True
+    now = time.monotonic()
+    with _nonces_lock:
+        if len(_nonces) > 10_000:
+            for key in [k for k, exp in _nonces.items() if exp < now]:
+                del _nonces[key]
+        expiry = _nonces.get(nonce)
+        if expiry is not None and expiry >= now:
+            return False
+        _nonces[nonce] = now + _NONCE_TTL_SECONDS
+        return True
+
+
+def _release_nonce(nonce: Optional[str]) -> None:
+    if nonce is None:
+        return
+    with _nonces_lock:
+        _nonces.pop(nonce, None)
+
+
+def _log_settled(stage: str, price: Optional[str], result, payer=None) -> None:
+    """One INFO line per settled payment: the revenue counter in the log.
+
+    "The wallet is the counter" is true and is also useless for attribution
+    -- which route, which payer, which hour. This line is what a log query
+    sums. Never raises.
+    """
+    try:
+        logging.getLogger(__name__).info(
+            "x402 SETTLED (%s) price=%s tx=%s network=%s payer=%s amount=%s",
+            stage, price,
+            getattr(result, "transaction", None),
+            getattr(result, "network", None),
+            payer or getattr(result, "payer", None),
+            getattr(result, "amount", None),
+        )
+    except Exception:
+        pass
+
+
+def verify_only_sync(
+    payment_header: str, price: Optional[str] = None, resource_url: Optional[str] = None
+):
     """Verify a payment without moving any money.
 
     Returns a PendingPayment handle to settle later, or None if the payment is
     invalid -- the same fail-closed contract as everything else here: any
     exception, any facilitator rejection, any missing configuration all
-    resolve to None.
+    resolve to None. Each of those is logged with its reason first, and the
+    reason is left for the route in `last_rejection()`, so the 402 that
+    answers a refused payment can say WHY instead of re-issuing the bare
+    challenge (a payer with an empty wallet and a payer facing a facilitator
+    outage used to get byte-identical answers).
+
+    The requirements the facilitator is asked to check against follow the
+    PAYLOAD's protocol version: v2 payloads against the v2 requirements
+    (`amount`, CAIP-2 network), v1 payloads against `PaymentRequirementsV1`
+    built from the same v1 `accepts[]` entry the 402 advertised
+    (`maxAmountRequired`, legacy network name, `resource_url`). Before the
+    facilitator is asked at all, the payload is compared to those
+    requirements locally and refused on any mismatch.
     """
+    _note_rejection(None)
     if not is_configured():
         return None
     resolved_price = price or _PRICE
+    nonce = None
     try:
-        payload = decode_payment_signature_header(payment_header)
-        requirements = _get_requirements(resolved_price)
+        try:
+            payload = decode_payment_signature_header(payment_header)
+        except Exception as exc:
+            _note_rejection(
+                "invalid_payment_payload",
+                f"the payment header could not be decoded ({type(exc).__name__})",
+            )
+            raise
+        nonce = _payment_nonce(payload)
+        if not _admit_nonce(nonce):
+            logging.getLogger(__name__).warning(
+                "x402 verify REFUSED: replayed authorization (nonce %s already "
+                "admitted on this node; price=%s). Not sent to the facilitator.",
+                (nonce or "")[:18], resolved_price,
+            )
+            _note_rejection(
+                "payment_replayed",
+                "this signed authorization was already submitted to this node; "
+                "sign a fresh one",
+            )
+            return None
         server = _get_server()
+        if getattr(payload, "x402_version", 2) == 1:
+            requirements = [_get_requirements_v1(resolved_price, resource_url)]
+        else:
+            requirements = _get_requirements(resolved_price)
+
+        requirement = _requirement_for(payload, requirements)
+        mismatch = _payload_mismatch(payload, requirement, server)
+        if mismatch is not None:
+            logging.getLogger(__name__).warning(
+                "x402 verify REFUSED before the facilitator: %s (price=%s, "
+                "payload v%s). The payer signed for a different challenge.",
+                mismatch, resolved_price, getattr(payload, "x402_version", "?"),
+            )
+            _note_rejection("payment_mismatch", mismatch)
+            _release_nonce(nonce)
+            return None
 
         async def _run():
-            return await server.verify_payment(payload, requirements[0])
+            return await server.verify_payment(payload, requirement)
 
-        if not asyncio.run(_run()).is_valid:
+        result = _run_coro_sync(_run())
+        if not result.is_valid:
+            _log_rejection("verify", resolved_price, result=result)
+            _note_rejection(
+                str(getattr(result, "invalid_reason", None) or "payment_rejected"),
+                str(getattr(result, "invalid_message", None) or "the facilitator rejected this payment"),
+            )
+            _release_nonce(nonce)
             return None
-        return PendingPayment(payload, requirements, resolved_price)
-    except Exception:
+        _note_rejection(None)
+        # Only the requirement the payer chose travels to settle.
+        return PendingPayment(payload, [requirement], resolved_price)
+    except Exception as exc:
+        _log_rejection("verify", resolved_price, exc=exc)
+        if last_rejection() is None:
+            _note_rejection(
+                "facilitator_unavailable",
+                "the facilitator could not be reached or did not answer in time; "
+                "the payment was not checked and nothing was charged -- retry",
+            )
+        _release_nonce(nonce)
         return None
 
 
@@ -770,15 +1666,32 @@ def record_settlement_in_stripe(settle_result, requirements) -> None:
         if not tx_hash or not getattr(settle_result, "success", False):
             return
 
+        # Opt-in, because on this deployment it cannot succeed. The pay-to is a
+        # self-custody wallet and Stripe's transaction_verification only
+        # verifies transfers into a Stripe-custodied address, so every attempt
+        # would raise -- and the exception branch below would then log, on
+        # every real payment, that Stripe "will not show it until this
+        # transaction hash is recorded". A log line that is false on the one
+        # day someone reads it is worse than no line.
+        if os.environ.get("X402_STRIPE_MIRROR") != "1":
+            if not _record_disabled_logged:
+                _record_disabled_logged = True
+                logging.getLogger(__name__).info(
+                    "x402 settled on-chain; revenue is in the pay-to wallet %s "
+                    "and will not appear in Stripe (X402_STRIPE_MIRROR unset -- "
+                    "Stripe does MPP, not x402). The wallet is the counter.",
+                    _PAY_TO_ADDRESS,
+                )
+            return
+
         stripe_key = os.environ.get("STRIPE_SECRET_KEY")
         if not stripe_key:
             if not _record_disabled_logged:
                 _record_disabled_logged = True
                 logging.getLogger(__name__).warning(
-                    "x402 settlement succeeded but STRIPE_SECRET_KEY is not "
-                    "set, so on-chain revenue will NOT appear in Stripe. The "
-                    "USDC is on the pay-to address; only the bookkeeping is "
-                    "missing."
+                    "X402_STRIPE_MIRROR=1 but STRIPE_SECRET_KEY is not set, so "
+                    "settlements are not being mirrored into Stripe. The USDC "
+                    "is on the pay-to address; only the bookkeeping is missing."
                 )
             return
 
@@ -835,13 +1748,60 @@ def record_settlement_in_stripe(settle_result, requirements) -> None:
         )
 
 
+# Which settle failures leave the money's fate UNKNOWN.
+#
+# `except TimeoutError` below exists for a settle whose outcome this node
+# cannot know: the request left, no answer came, and a transfer the
+# facilitator goes on to complete still moves the money. It caught the 45s
+# guard in `_run_coro_sync` -- and nothing else. httpx's own timeouts are NOT
+# builtin TimeoutError (ReadTimeout -> TimeoutException -> TransportError ->
+# RequestError -> HTTPError -> Exception), and the client's default read
+# timeout is 30s against our 45s guard, so httpx always fires FIRST. Every
+# mid-flight settle timeout therefore fell through to the generic handler,
+# was recorded "refused", and told the payer "this call was not charged"
+# about a transfer that may well have completed.
+#
+# Being wrong in that direction invites a second payment for one audit. So
+# classify by whether the request could have REACHED the facilitator at all:
+# a connect or pool failure never sent it and is safely "not charged"; a read
+# or write timeout, or a connection dropped mid-exchange, may have landed.
+# Matched by class NAME up the MRO so this module keeps no httpx import and
+# stays correct if the client library swaps its transport.
+_SETTLE_REACHED_EXC_NAMES = frozenset({
+    "ReadTimeout", "WriteTimeout", "TimeoutException",
+    "RemoteProtocolError", "ReadError", "WriteError",
+})
+_SETTLE_NEVER_SENT_EXC_NAMES = frozenset({
+    "ConnectTimeout", "ConnectError", "PoolTimeout", "ProxyError",
+    "UnsupportedProtocol", "InvalidURL",
+})
+
+
+def _settle_outcome_of(exc) -> str:
+    """"unknown" when settlement may still have completed, else "refused".
+
+    The leaf class wins: ConnectTimeout is a TimeoutException by inheritance
+    and still means the request was never sent.
+    """
+    if isinstance(exc, TimeoutError):
+        return "unknown"
+    for cls in type(exc).__mro__:
+        if cls.__name__ in _SETTLE_NEVER_SENT_EXC_NAMES:
+            return "refused"
+        if cls.__name__ in _SETTLE_REACHED_EXC_NAMES:
+            return "unknown"
+    return "refused"
+
+
 def settle_sync(pending) -> bool:
     """Capture a previously verified payment. Call only after delivering.
 
-    A False here means we delivered an audit we were not paid for, which is
-    the deliberately-chosen lesser evil: the alternative ordering charges for
-    work that was never delivered. Callers should surface it rather than
-    swallow it, so the gap stays visible instead of silent.
+    A False here means the audit ran and was not paid for. What the caller
+    does with that follows `pending.settle_state`: a definite "refused"
+    withholds the result and re-issues the 402 (main._settlement_refused);
+    "pending" and "unknown" may have moved the money and are delivered with
+    the state on the body. Never charge for work that was not delivered;
+    never deliver work the facilitator refused to charge for.
     """
     if pending is None:
         return False
@@ -851,51 +1811,80 @@ def settle_sync(pending) -> bool:
         async def _run():
             return await server.settle_payment(pending.payload, pending.requirements[0])
 
-        result = asyncio.run(_run())
+        result = _run_coro_sync(_run())
         if result.success:
+            pending.settle_result = result
+            pending.settle_state = "settled"
+            _log_settled("settle", pending.price, result)
             record_settlement_in_stripe(result, pending.requirements[0])
-        return bool(result.success)
-    except Exception:
-        return False
-
-
-async def verify_and_settle(payment_header: str, price: Optional[str] = None) -> bool:
-    """Verify a signed X-PAYMENT header and settle it via the facilitator.
-
-    `price` must match whatever price the caller was actually challenged
-    with for this specific route -- defaults to the deploy-wide X402_PRICE
-    for callers (like the original /audit route) that don't vary price.
-
-    Returns True only if the facilitator confirms both verification and
-    settlement succeeded. Never raises past this boundary; any failure
-    mode -- malformed header, facilitator rejection, network error --
-    returns False.
-    """
-    if not is_configured():
-        return False
-    try:
-        payload = decode_payment_signature_header(payment_header)
-        requirements = _get_requirements(price or _PRICE)
-        server = _get_server()
-
-        verify_result = await server.verify_payment(payload, requirements[0])
-        if not verify_result.is_valid:
+            return True
+        reason = getattr(result, "error_reason", None)
+        transaction = _transaction_of(result)
+        if reason == "settlement_pending":
+            # The facilitator broadcast the transfer and has not seen it
+            # confirm (the library already retried once). That is money in
+            # flight, not a refusal: the payer gets the hash as a receipt and
+            # an honest "pending", and the log keeps the hash for
+            # reconciliation. Calling this "not charged" told the payer one
+            # thing while USDC landed in the owner's wallet.
+            pending.settle_result = result
+            pending.settle_state = "pending"
+            logging.getLogger(__name__).info(
+                "x402 settle PENDING after delivery (facilitator=%s price=%s): "
+                "tx=%s reason=%s -- reconcile on-chain",
+                _FACILITATOR_URL, pending.price, transaction, reason,
+            )
             return False
-
-        settle_result = await server.settle_payment(payload, requirements[0])
-        if settle_result.success:
-            record_settlement_in_stripe(settle_result, requirements[0])
-        return bool(settle_result.success)
-    except Exception:
+        # An audit was delivered and not paid for. The reason is the only
+        # thing that distinguishes a facilitator outage from a payer whose
+        # funds moved between verify and settle.
+        pending.settle_state = "refused"
+        pending.settle_error = _short(
+            "the facilitator refused it: %s%s" % (
+                reason or "no reason given",
+                _suffix(getattr(result, "error_message", None)),
+            )
+        )
+        logging.getLogger(__name__).warning(
+            "x402 settle REFUSED after delivery (facilitator=%s price=%s): "
+            "error=%s message=%s",
+            _FACILITATOR_URL, pending.price,
+            reason,
+            getattr(result, "error_message", None),
+        )
         return False
-
-
-def verify_and_settle_sync(payment_header: str, price: Optional[str] = None) -> bool:
-    """Sync wrapper for the FastAPI route handler, which is itself sync
-    (it calls Playwright's sync API). Any failure -- including there being
-    no running event loop to reuse -- fails closed, same as the async path.
-    """
-    try:
-        return asyncio.run(verify_and_settle(payment_header, price))
-    except Exception:
+    except TimeoutError as exc:
+        # The request may have reached the facilitator; a settle it goes on
+        # to complete after this node stopped waiting still moves the money.
+        # Unknown, not refused -- and said so, with the nonce, so the owner
+        # can reconcile against the chain.
+        pending.settle_state = "unknown"
+        pending.settle_error = _short(
+            "the facilitator did not answer in time: %s" % exc)
+        logging.getLogger(__name__).warning(
+            "x402 settle TIMED OUT after delivery (facilitator=%s price=%s nonce=%s): "
+            "%s. Settlement status UNKNOWN -- the transfer may still complete; "
+            "reconcile on-chain.",
+            _FACILITATOR_URL, pending.price,
+            (_payment_nonce(getattr(pending, "payload", None)) or "")[:18], exc,
+        )
+        return False
+    except Exception as exc:
+        outcome = _settle_outcome_of(exc)
+        pending.settle_state = outcome
+        pending.settle_error = _short("%s: %s" % (type(exc).__name__, exc))
+        if outcome == "unknown":
+            # Same sentence as the TimeoutError branch on purpose: the owner
+            # greps one string for every way a settle can fail, and the two
+            # cases mean the identical thing to whoever reads it.
+            logging.getLogger(__name__).warning(
+                "x402 settle TIMED OUT after delivery (facilitator=%s price=%s nonce=%s): "
+                "%s: %s. Settlement status UNKNOWN -- the transfer may still complete; "
+                "reconcile on-chain.",
+                _FACILITATOR_URL, pending.price,
+                (_payment_nonce(getattr(pending, "payload", None)) or "")[:18],
+                type(exc).__name__, exc,
+            )
+        else:
+            _log_rejection("settle", getattr(pending, "price", None), exc=exc)
         return False

@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://hubvibe-831480473793.us-south1.run.app/sitemap.xml
+Sitemap: https://hubvibe-io.com/sitemap.xml

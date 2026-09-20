@@ -1,2 +1,7 @@
+# Kept for gcloud, not for git. `scripts/repair-and-deploy.sh` deploys with
+# `gcloud run deploy --source=wcag-audit-engine`, and gcloud builds an upload
+# filter only when the source root holds a .git or .gitignore; without one it
+# uploads every file in this directory, untracked included. Git's own handling
+# of these two patterns comes from the root .gitignore.
 __pycache__/
 *.pyc

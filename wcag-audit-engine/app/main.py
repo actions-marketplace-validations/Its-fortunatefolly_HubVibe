@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import secrets
 import threading
@@ -6,10 +7,12 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from axe_playwright_python.sync_playwright import Axe
 from fastapi import Body, FastAPI, Header, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -50,8 +53,37 @@ except ImportError:
     mpp_payments = _load_sibling_module("mpp_payments")  # type: ignore
     x402_payments = _load_sibling_module("x402_payments")  # type: ignore
 
+# The worker network: additional machine-payable capabilities that run BESIDE
+# the audits. Kept in its own import block so the audit imports above are
+# untouched, and wrapped so that a fault anywhere in it can never stop the
+# audits from serving -- the audits are the working business, and a new
+# capability failing to load must cost us the capability, not the revenue.
+try:
+    try:
+        from . import workers  # type: ignore
+    except ImportError:
+        # Same by-file-path fallback the siblings use, adapted for a package:
+        # a package needs its own submodule_search_locations so that the
+        # relative imports inside it resolve.
+        import importlib.util
+        import sys
+
+        _workers_dir = Path(__file__).resolve().parent / "workers"
+        _workers_spec = importlib.util.spec_from_file_location(
+            "wcag_audit_engine_workers",
+            _workers_dir / "__init__.py",
+            submodule_search_locations=[str(_workers_dir)],
+        )
+        workers = importlib.util.module_from_spec(_workers_spec)  # type: ignore
+        sys.modules["wcag_audit_engine_workers"] = workers
+        _workers_spec.loader.exec_module(workers)
+except Exception as _workers_import_error:  # pragma: no cover - defensive
+    workers = None  # type: ignore
+    logging.getLogger("hubvibe").warning(
+        "worker network unavailable, audits unaffected: %s", _workers_import_error)
+
 PUBLIC_BASE_URL = os.environ.get(
-    "PUBLIC_BASE_URL", "https://hubvibe-831480473793.us-south1.run.app"
+    "PUBLIC_BASE_URL", "https://hubvibe-io.com"
 )
 
 # One version number for this service, quoted by everything that publishes
@@ -63,7 +95,20 @@ PUBLIC_BASE_URL = os.environ.get(
 # reading a version that names the wrong build. Kept in step with
 # server.json (the official registry's copy) by a test, since that file is
 # outside the container's build context and cannot be read at runtime.
-SERVICE_VERSION = "1.1.2"
+SERVICE_VERSION = "1.4.0"
+
+# The revenue counter in the log -- "x402 SETTLED ..." -- is an INFO line.
+# Python's root logger defaults to WARNING and uvicorn configures only its
+# own loggers, so in the shipped container every INFO line this app wrote
+# was dropped: the 2026-09-06 rehearsal paid the image three times and
+# `docker logs` showed zero SETTLED lines, while the runbook told the owner
+# to grep for them. Configure the root once; a host that already did wins.
+_root_logger = logging.getLogger()
+if not _root_logger.handlers:
+    logging.basicConfig(format="%(levelname)s:%(name)s:%(message)s")
+_configured_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+if _root_logger.level == logging.NOTSET or _root_logger.level > _configured_level:
+    _root_logger.setLevel(_configured_level)
 
 # Each in-flight audit holds a Chromium browser (see browser_pool), so the
 # ceiling on concurrent audits is really a memory ceiling, not a CPU one.
@@ -80,6 +125,8 @@ async def _lifespan(_app: "FastAPI"):
         import anyio.to_thread
 
         anyio.to_thread.current_default_thread_limiter().total_tokens = MAX_CONCURRENT_AUDITS
+        # Off the loop: Playwright's sync driver raises inside a running one.
+        await anyio.to_thread.run_sync(_resolve_browser_path)
     except Exception:
         # Not fatal: worst case we run on anyio's default thread count.
         pass
@@ -93,8 +140,8 @@ app = FastAPI(
     description=(
         "Machine-payable site compliance audits. Four deterministic audit "
         "dimensions -- accessibility (axe-core), SEO, security headers, and "
-        "performance -- callable a la carte at $0.03/call or as a single "
-        "$0.10 bundle.\n\n"
+        "performance -- callable a la carte at $0.05/call or as a single "
+        "$0.15 bundle.\n\n"
         "Built for agent-to-agent use: every paid route answers an "
         "unauthenticated request with HTTP 402 carrying a machine-readable "
         "payment challenge, so a paying agent can discover the price and "
@@ -111,22 +158,270 @@ app = FastAPI(
     openapi_tags=[
         {"name": "audit", "description": "Paid, machine-payable audit routes."},
         {"name": "discovery", "description": "Manifests agents use to find and price these tools."},
-        {"name": "billing", "description": "Human subscription checkout and key issuance."},
+        {"name": "billing", "description": "One-off report purchase and retrieval. Audits themselves are paid per call."},
     ],
 )
 
 # Agents call this from browsers, edge workers, and other origins. There are
 # no cookies or sessions here -- authentication is an explicit per-request
-# header -- so a wildcard origin grants no ambient authority. WWW-Authenticate
-# must be exposed or a browser-side caller literally cannot read the MPP
-# payment challenge off a 402 and would have no way to pay.
+# header -- so a wildcard origin grants no ambient authority.
+#
+# Every header a paying client has to READ must be listed in expose_headers,
+# or a browser-resident caller literally cannot see it: the browser strips
+# unlisted response headers from cross-origin responses before script ever
+# sees them. That is every rail's challenge and receipt --
+#   WWW-Authenticate      the MPP challenge on a 402
+#   PAYMENT-REQUIRED      the x402 v2 challenge on a 402 (a v2 client reads
+#                         this FIRST; without it a browser client is silently
+#                         downgraded to the v1 body, or sees no x402 at all)
+#   PAYMENT-RESPONSE /    the x402 settlement receipt on the paid 200 -- the
+#   X-PAYMENT-RESPONSE    transaction hash the payer reconciles against
+#   Retry-After           when to come back after a 429, so a browser agent
+#                         backs off instead of giving up on the node.
+# Request headers (X-PAYMENT, PAYMENT-SIGNATURE, Authorization, X-API-Key) are
+# covered by allow_headers=["*"].
+CORS_EXPOSED_HEADERS = [
+    "WWW-Authenticate",
+    "Cache-Control",
+    "PAYMENT-REQUIRED",
+    "PAYMENT-RESPONSE",
+    "X-PAYMENT-RESPONSE",
+    "Retry-After",
+]
+
+# The largest request body this node will read, in bytes. The biggest
+# legitimate body is an `html` audit at MAX_HTML_BYTES (2 MiB) plus JSON
+# escaping; anything past this is refused before it is buffered. Without a
+# cap, `Body(...)` read and parsed whatever arrived: a 300 MB unpaid POST to
+# /mcp took the worker to ~1 GB RSS before the html-size gate ever ran, and
+# three of them in flight exceed the container's 3 GB limit -- the box
+# OOM-kills the node, every paid audit in flight dies unbilled, and the
+# attacker paid nothing but bandwidth. Caddy enforces the same cap in front
+# (deploy/vps/Caddyfile); this one holds on any host, Cloud Run included.
+MAX_REQUEST_BYTES = int(os.environ.get("MAX_REQUEST_BYTES", str(4 * 1024 * 1024)))
+
+
+def _body_too_large_content(path: str, size: int, max_bytes: int) -> dict:
+    detail = (
+        f"request body is {size} bytes; this node reads at most {max_bytes}. "
+        "Nothing was charged for this request."
+    )
+    if path == "/mcp":
+        # JSON-RPC callers get a JSON-RPC error, not a REST shape.
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": detail}}
+    return {"status": "error", "detail": detail, "billed": False, "max_request_bytes": max_bytes}
+
+
+class _BodyTooLarge(HTTPException):
+    """Raised from the counting `receive` when a chunked body passes the cap.
+
+    An HTTPException on purpose: FastAPI's route handler turns any OTHER
+    exception raised while it reads the body into a generic 400 before an
+    exception handler can see it, and re-raises HTTPExceptions untouched --
+    so this one reaches the handler below and answers as a 413.
+    """
+
+    def __init__(self, size: int, max_bytes: int):
+        super().__init__(status_code=413, detail="request body too large")
+        self.size = size
+        self.max_bytes = max_bytes
+
+
+@app.exception_handler(_BodyTooLarge)
+async def _body_too_large(request: Request, exc: _BodyTooLarge):
+    return JSONResponse(
+        status_code=413, content=_body_too_large_content(request.url.path, exc.size, exc.max_bytes)
+    )
+
+
+class _RequestBodyLimit:
+    """Pure-ASGI middleware: refuse a request body over `max_bytes` with 413.
+
+    Two checks. A declared Content-Length over the cap is refused before a
+    byte of body is read. A body that arrives without one (chunked) is
+    counted as it streams, and cut off the moment it passes the cap -- a
+    missing header must not be the way around the limit.
+    """
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = None
+        for name, value in scope.get("headers") or []:
+            if name == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    declared = None
+                break
+        if declared is not None and declared > self.max_bytes:
+            await self._refuse(scope, send, declared)
+            return
+
+        received = 0
+        started = False
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body") or b"")
+                if received > self.max_bytes:
+                    raise _BodyTooLarge(received, self.max_bytes)
+            return message
+
+        async def tracking_send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracking_send)
+        except _BodyTooLarge as exc:
+            if started:
+                raise
+            await self._refuse(scope, send, exc.size)
+
+    async def _refuse(self, scope, send, size: int):
+        response = JSONResponse(
+            status_code=413,
+            content=_body_too_large_content(scope.get("path") or "", size, self.max_bytes),
+        )
+        await response(scope, _empty_receive, send)
+
+
+async def _empty_receive():
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+
+# The rate a caller is quoted when the route cannot be resolved -- a
+# signature default or a price string that would not parse. It is the single
+# audit rate, read from the catalog below rather than written twice, because
+# a stale literal here quotes one price while the route charges another.
+_DEFAULT_PRICE_USD = 0.05
+
+
+def _price_of(path: str) -> float:
+    """The catalog price for a route this module serves. Raises on an unknown
+    path rather than defaulting: a route that cannot say what it charges must
+    not quietly bill whatever the cheapest one costs."""
+    price = _paid_route_price(path)
+    if price is None:
+        raise KeyError(f"{path} is not a priced route in _CATALOG")
+    return price
+
+
+def _paid_route_price(path: Optional[str]) -> Optional[float]:
+    """This route's price, or None when the path is not a paid route.
+
+    Read from `_CATALOG` -- the one row per sellable route -- rather than
+    from a second table beside it. A hardcoded copy here would let the price
+    a probe is quoted drift from the price the handler charges, which is the
+    same class of fault as advertising a rail that cannot settle: the node
+    would be telling an agent one number and billing another. Resolved at
+    call time because _CATALOG is defined further down this module; the
+    middleware only ever runs per-request, long after import.
+    """
+    if not path:
+        return None
+    resolved = _CATALOG_ALIASES.get(path, path)
+    for entry in _CATALOG:
+        if entry["path"] == resolved:
+            return entry["price_usd"]
+    # The worker network prices its own routes from its own catalog, and
+    # only after the audit catalog, so it can never shadow or alter what an
+    # audit route charges.
+    if workers is not None:
+        worker_price = workers.catalog.price_of(resolved)
+        if worker_price is not None:
+            return worker_price
+    return None
+
+
+_CREDENTIAL_HEADERS = ("x-api-key", "x-payment", "payment-signature", "authorization")
+
+
+def _carries_credential(request: Request) -> bool:
+    return any(request.headers.get(name) for name in _CREDENTIAL_HEADERS)
+
+
+class _PriceUnpaidProbes:
+    """A paid route answers a request that carries no credential with its
+    price, whatever else is wrong with the request.
+
+    The indexers and verifiers that decide whether this node is listed
+    (uvd-bazaar-health, PayAI-Uptime-Monitor, x402lens-indexer,
+    x402-directory-verifier, allow402-quote, hermes) cannot know the input
+    schema before they have seen the challenge, so they GET, HEAD, or POST an
+    empty body. Until 2026-09-13 method routing and body validation ran
+    before the payment gate, so those probes got 405, 422 or 400: in one day
+    the box's ledger showed ~240 crawler POSTs and ~500 GET/HEADs bouncing
+    that way while 25 requests in total saw a 402. A crawler that never sees
+    the price cannot list it, and a listing is where every paying agent
+    comes from.
+
+    Validation still runs first for a request that DOES carry a credential:
+    a payer's malformed body has to be refused before its signature reaches
+    the facilitator, or the nonce is burned and the corrected retry is
+    refused as a replay (see _reject_missing_input). With no credential there
+    is no nonce to protect, so the challenge can go first.
+
+    The 402 is the very one the auth gate issues, rate limiter included;
+    a non-POST probe also learns the method. OPTIONS passes through to CORS.
+    Pure ASGI, like _RequestBodyLimit, and registered before it so the cap
+    wraps this: a declared body over the cap is a 413, credential or not. A
+    Starlette BaseHTTPMiddleware here would wrap the body reader and turn the
+    cap's _BodyTooLarge into a generic 400 for a credentialed caller.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        method = scope.get("method")
+        price = _paid_route_price(scope.get("path")) if scope["type"] == "http" else None
+        if price is None or method == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope, _empty_receive)  # headers only; the body is never read here
+        if _carries_credential(request):
+            await self.app(scope, receive, send)
+            return
+        _, challenge = _authorize_and_rate_limit(None, None, None, request, price_usd=price)
+        if challenge is None:  # pragma: no cover -- nothing authenticates without a credential
+            await self.app(scope, receive, send)
+            return
+        if method != "POST":
+            challenge.headers["allow"] = "POST"
+        if method == "HEAD":
+            # Status and headers only: a body on a HEAD response is a protocol
+            # error at the HTTP layer, and h11 refuses to send it.
+            challenge = Response(
+                status_code=challenge.status_code,
+                headers={k: v for k, v in challenge.headers.items() if k.lower() != "content-length"},
+            )
+        await challenge(scope, _empty_receive, send)
+
+
+app.add_middleware(_PriceUnpaidProbes)
+
+
+# Added BEFORE CORS so CORS wraps it: a browser caller can read the 413.
+app.add_middleware(_RequestBodyLimit, max_bytes=MAX_REQUEST_BYTES)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
-    expose_headers=["WWW-Authenticate", "Cache-Control"],
+    expose_headers=CORS_EXPOSED_HEADERS,
     max_age=86400,
 )
 
@@ -220,9 +515,56 @@ class _SlidingWindowLimiter:
 
 _audit_limiter = _SlidingWindowLimiter(RATE_LIMIT_PER_MINUTE, 60.0)
 
+# How many proxy hops sit between the public internet and this container, i.e.
+# which X-Forwarded-For entry is the address the platform itself appended.
+# Cloud Run's front end appends the connecting client's address as the LAST
+# entry (1). A deployment that later puts an external HTTPS load balancer in
+# front gains one more trusted hop and sets 2. Anything a client supplies in
+# the header sits BEFORE the platform's entries and is never read.
+RATE_LIMIT_PROXY_DEPTH = max(1, int(os.environ.get("RATE_LIMIT_PROXY_DEPTH", "1")))
+
+
+def _client_ip(request: Request) -> str:
+    """The address the rate limiter keys an unkeyed caller on.
+
+    `request.client.host` is the TCP peer, and on Cloud Run the TCP peer is
+    the platform's own front-end proxy -- the same address for every caller on
+    earth. Keyed on that, every x402 and MPP payer, and every agent reading an
+    unpaid 402, shared ONE bucket of RATE_LIMIT_PER_MINUTE per instance. Past
+    ten unpaid reads a second, per instance, every paying agent got a 429:
+    refused revenue, keyed on nothing to do with the agent. The limiter exists
+    to stop a single runaway client; it was stopping everyone.
+
+    The address Cloud Run vouches for is the one IT appended to
+    X-Forwarded-For -- the last entry, counting back RATE_LIMIT_PROXY_DEPTH
+    hops. A client can prepend whatever it likes to that header; it cannot
+    append after the platform. Without the header (local test, direct
+    uvicorn) the TCP peer is the client and is used as before.
+    """
+    forwarded = request.headers.get("x-forwarded-for") if request else None
+    if forwarded:
+        hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
+        if len(hops) >= RATE_LIMIT_PROXY_DEPTH:
+            return hops[-RATE_LIMIT_PROXY_DEPTH]
+        if hops:
+            return hops[0]
+    if request is not None and request.client:
+        return request.client.host
+    return "unknown"
+
+
+# Largest raw-HTML body an audit accepts. A page is tens of kilobytes; two
+# megabytes is a generous ceiling for anything a browser would render. Without
+# a cap the field was unbounded, and one caller posting a few hundred MB of
+# "html" would take the instance down for everyone queued behind it -- for
+# free, since a 402 costs nothing to trigger.
+MAX_HTML_BYTES = int(os.environ.get("MAX_HTML_BYTES", str(2 * 1024 * 1024)))
+
 
 class AuditRequest(BaseModel):
-    html: Optional[str] = Field(None, description="Raw HTML source to audit")
+    html: Optional[str] = Field(
+        None, description="Raw HTML source to audit", max_length=MAX_HTML_BYTES
+    )
     url: Optional[str] = Field(None, description="Live URL to audit instead of raw HTML")
 
 
@@ -254,6 +596,20 @@ class AuthContext:
         # account and no second channel, so the response IS the delivery
         # mechanism -- drop it and the money is taken with nothing handed back.
         "issued_key",
+        # What authentication already took, so a failed audit can hand it
+        # back (_unbill_failed_audit): the prepaid key debited for this call
+        # and how many cents, and the MPP credential marked as spent.
+        "prepaid_key",
+        "prepaid_cents",
+        "mpp_credential",
+        # Set when a top-up was CHARGED but its key could not be minted, so the
+        # response can tell the payer that credit is owed instead of going quiet.
+        "credit_owed",
+        # The host and route the x402 challenge was issued for, so a
+        # settlement the facilitator refuses is answered with the same payable
+        # 402 the caller started from (see _settlement_refused).
+        "challenge_host",
+        "challenge_path",
     )
 
     def __init__(
@@ -263,6 +619,12 @@ class AuthContext:
         payment_method: str = "api_key",
         pending_payment=None,
         issued_key: Optional[str] = None,
+        credit_owed: Optional[str] = None,
+        prepaid_key: Optional[str] = None,
+        prepaid_cents: int = 0,
+        mpp_credential: Optional[str] = None,
+        challenge_host: Optional[str] = None,
+        challenge_path: Optional[str] = None,
     ):
         self.stripe_billable = stripe_billable
         self.customer_id = customer_id
@@ -271,6 +633,37 @@ class AuthContext:
         # see _bill. None for every other payment method.
         self.pending_payment = pending_payment
         self.issued_key = issued_key
+        self.credit_owed = credit_owed
+        self.prepaid_key = prepaid_key
+        self.prepaid_cents = prepaid_cents
+        self.mpp_credential = mpp_credential
+        self.challenge_host = challenge_host
+        self.challenge_path = challenge_path
+
+
+def _worker_input_example(worker) -> dict:
+    """A plausible body for a worker, built from its own JSON Schema.
+
+    The Bazaar record carries an example an agent may generate its first
+    request from, so the example has to satisfy the route's required fields --
+    an example the route would 400 on is worse than none.
+    """
+    example = {}
+    properties = worker.input_schema.get("properties") or {}
+    for field in worker.input_schema.get("required") or []:
+        spec = properties.get(field) or {}
+        kind = spec.get("type")
+        if kind == "array":
+            example[field] = ["example"]
+        elif kind == "integer":
+            example[field] = 10
+        elif kind == "number":
+            example[field] = 1.0
+        elif field in ("url", "final_url"):
+            example[field] = "https://example.com"
+        else:
+            example[field] = "example"
+    return example
 
 
 def _bazaar_extension_for_path(path: Optional[str]) -> dict:
@@ -293,6 +686,18 @@ def _bazaar_extension_for_path(path: Optional[str]) -> dict:
     path = _CATALOG_ALIASES.get(path, path)
     entry = next((e for e in _CATALOG if e["path"] == path), None)
     if entry is None:
+        # A worker route. It needs Bazaar discovery data for exactly the same
+        # reason an audit does: a paid route with none is payable but
+        # invisible to capability search, which is indistinguishable from
+        # nobody wanting to buy it.
+        if workers is not None:
+            worker = workers.catalog.get(path)
+            if worker is not None:
+                return x402_payments.bazaar_extension_for_body(
+                    input_example=_worker_input_example(worker),
+                    input_schema=worker.input_schema,
+                    output_example={"status": "ok"},
+                )
         return {}
     schema = (
         _MCP_URL_SCHEMA if entry["input"] is _URL_INPUT_SCHEMA else _MCP_HTML_OR_URL_SCHEMA
@@ -316,11 +721,20 @@ def _route_description(path: Optional[str]) -> str:
         entry = next((e for e in _CATALOG if e["path"] == resolved), None)
         if entry is not None:
             return entry["description"]
+        if workers is not None:
+            worker_description = workers.catalog.description_of(resolved)
+            if worker_description:
+                return worker_description
     return "HubVibe site audit"
 
 
 def _payment_required_response(
-    host: Optional[str] = None, price_usd: float = 0.03, path: Optional[str] = None
+    host: Optional[str] = None,
+    price_usd: float = _DEFAULT_PRICE_USD,
+    path: Optional[str] = None,
+    error: Optional[str] = None,
+    error_detail: Optional[str] = None,
+    retry_after: Optional[int] = None,
 ) -> JSONResponse:
     """The 402 shape a caller needs to pay via x402, MPP, or get a Stripe
     API key -- returned whenever none of those is attached and valid (or
@@ -334,6 +748,15 @@ def _payment_required_response(
     route's rate, plus the x402-style JSON body for callers that read
     price/payTo from the body instead. Cache-Control: no-store is required
     by the MPP core spec on every 402.
+
+    `error` / `error_detail` / `retry_after` are set when this 402 answers a
+    payment that was TRIED and refused. The x402 reference server re-issues
+    its 402 with the facilitator's `invalid_reason` as `error`, and the
+    official client does not retry a second 402 -- so a bare re-challenge
+    leaves the agent nothing to act on. An empty wallet, a signature for the
+    wrong route and a facilitator outage used to produce byte-identical
+    responses; the outage now also carries Retry-After, because the payer
+    did nothing wrong.
     """
     price = f"${price_usd:.2f}"
     resource_url = f"{PUBLIC_BASE_URL}{path}" if path else PUBLIC_BASE_URL
@@ -366,7 +789,7 @@ def _payment_required_response(
     # configured, no key can be issued or metered, so advertising it would be
     # advertising a rail that cannot settle.
     # The SPT top-up. Advertised only when a per-call SPT charge is
-    # impossible -- Stripe's 0.50 USD floor against a $0.03 route -- because
+    # impossible -- Stripe's 0.50 USD floor against a cents-priced route -- because
     # that is exactly when buying a block is the only way this rail can
     # settle at all. An agent iterating `other_rails` sees a fiat option it
     # can actually use, instead of a rail that is simply missing.
@@ -391,7 +814,10 @@ def _payment_required_response(
             }
         )
 
-    if billing.is_configured():
+    # The subscription-backed key rail is listed only while a plan is for
+    # sale. With the human tiers retired (2026-09-06) that is never; the
+    # prepaid key the MPP top-up sells is advertised by that rail instead.
+    if billing.is_configured() and billing.human_plans_live():
         other_rails.append(
             {
                 "protocol": "api_key",
@@ -407,8 +833,37 @@ def _payment_required_response(
             }
         )
 
+    # The key rail's human doorway. X-API-Key is read on every deployment
+    # (the internal key, prepaid keys), but a key can only be BOUGHT where
+    # Stripe billing is configured -- /billing/checkout answers 501
+    # everywhere else. Naming that URL on an x402-only node sent an agent's
+    # operator to a dead end and read as "the service is broken".
+    # ...and when NOTHING is live, that doorway is a dead end too: pointing a
+    # caller at `other_rails` for a key while `other_rails` is empty is the
+    # same wrong turn one level down. Say the true thing instead.
+    if accepts or other_rails:
+        alternative = {
+            "header": "X-API-Key",
+            "detail": (
+                "A prepaid key: bought with the MPP top-up rail in `other_rails` "
+                "where that rail is live, and spent per call at the same rates. "
+                "There are no subscriptions; pay per call with a rail in `accepts`."
+            ),
+        }
+    else:
+        alternative = {
+            "header": "X-API-Key",
+            "detail": (
+                "No payment rail is live on this deployment right now -- `accepts` "
+                "and `other_rails` are both empty, so this call cannot be bought "
+                "and no retry will change that. A prepaid key issued earlier still "
+                "spends. This is a configuration state on our side, not a "
+                "rejection of your request."
+            ),
+        }
+
     body = {
-        "error": "payment_required",
+        "error": error or "payment_required",
         "price_usd": price_usd,
         "price": price,
         # x402Version marks this body as a v1 challenge. It is what makes a
@@ -418,22 +873,27 @@ def _payment_required_response(
         "x402Version": 1,
         "accepts": accepts,
         "other_rails": other_rails,
-        "alternative": {
-            "header": "X-API-Key",
-            "detail": (
-                "Key issued with a human plan, priced per site watched. "
-                "For machine volume, pay per call with a rail in `accepts`."
-            ),
-            "get_one": f"{PUBLIC_BASE_URL}/billing/checkout",
-        },
+        "alternative": alternative,
         "docs": f"{PUBLIC_BASE_URL}/.well-known/agent.json",
     }
+    if error:
+        body["error_detail"] = error_detail or error
+        body["billed"] = False
     # Bazaar discovery. Facilitators catalog x402 resources by reading this
     # off their 402s, and agents shop that index by capability -- without it
     # this endpoint is findable only by someone who already has the URL.
     bazaar = _bazaar_extension_for_path(path)
     if bazaar:
         body["extensions"] = bazaar
+    # Workers priced above the x402 client libraries' default $1 per-payment
+    # cap: a stock agent refuses these locally and reads THIS body to learn
+    # why, so it says how to lift the cap. Every 402 for a /work route is
+    # built here (the probe path answers before the router runs), which is
+    # why the note lives here and nowhere else. The price is unchanged.
+    worker = workers.catalog.get(path) if workers is not None and path else None
+    note = workers.catalog.buyer_note(worker) if worker is not None else None
+    if note:
+        body["buyer_note"] = note
 
     response = JSONResponse(status_code=402, content=body)
 
@@ -448,12 +908,21 @@ def _payment_required_response(
         resource_url=resource_url,
         description=_route_description(path),
         extensions=bazaar or None,
+        error=error,
     ).items():
         response.headers[name] = value
     response.headers["Cache-Control"] = "no-store"
+    if retry_after:
+        response.headers["Retry-After"] = str(int(retry_after))
     for header_value in mpp_payments.www_authenticate_headers(realm=host, price_usd=price_usd):
         response.headers.append("WWW-Authenticate", header_value)
     return response
+
+
+# How long a payer should wait when the FACILITATOR, not the payer, was the
+# reason a payment could not be checked. Short: outages that matter are
+# minutes long, and an agent that waits an hour for a 30-second blip is lost.
+_FACILITATOR_RETRY_AFTER_SECONDS = 30
 
 
 def _authenticate(
@@ -461,10 +930,13 @@ def _authenticate(
     x_payment: Optional[str],
     authorization: Optional[str],
     host: Optional[str] = None,
-    price_usd: float = 0.03,
+    price_usd: float = _DEFAULT_PRICE_USD,
     path: Optional[str] = None,
+    client_ip: Optional[str] = None,
 ):
-    """Returns an AuthContext on success, or a 402 JSONResponse on failure.
+    """Returns an AuthContext on success, or a 402 JSONResponse on failure
+    (a 429 when a key that did not authenticate came from an address that
+    is over its limit -- see below).
 
     Three independent paths, checked cheapest-first, any one sufficient:
     1. X-API-Key -- internal test key, or a real Stripe-issued key that
@@ -480,22 +952,39 @@ def _authenticate(
        match the realm the challenge was originally issued with.
     """
     if x_api_key:
-        if API_KEY and secrets.compare_digest(x_api_key, API_KEY):
+        # Compared as bytes: compare_digest on str raises TypeError for a
+        # non-ASCII character, and a header can carry one (Starlette decodes
+        # header bytes as latin-1). A stray byte in a key must be a 402, not
+        # a 500.
+        if API_KEY and secrets.compare_digest(
+            x_api_key.encode("utf-8"), API_KEY.encode("utf-8")
+        ):
             # Internal/testing key: unlimited, unmetered, never billed,
             # never quota-limited.
             return AuthContext(stripe_billable=False, payment_method="internal")
-        if billing.is_configured():
-            record = billing.lookup_key(x_api_key)
+        # Spending a prepaid key is gated on the key store answering, NOT on
+        # billing.is_configured(). That function asks whether Stripe could sell
+        # a SUBSCRIPTION -- it wants a webhook secret and a sellable price ID --
+        # and the MPP top-up that mints prepaid keys needs neither. A box
+        # configured for the top-up and nothing else therefore sold a $0.50 key
+        # and then refused every call made with it. lookup_key already returns
+        # None when the store cannot answer, so it is safe to ask first.
+        record = billing.lookup_key(x_api_key)
+        if record is not None:
             # A prepaid key carries its own money and has no Stripe Customer
             # behind it, so it is spent rather than metered or quota-checked.
-            if record is not None and record.get("prepaid_balance_cents") is not None:
-                if billing.spend_prepaid(x_api_key, round(price_usd * 100)):
+            if record.get("prepaid_balance_cents") is not None:
+                call_cents = round(price_usd * 100)
+                if billing.spend_prepaid(x_api_key, call_cents):
                     return AuthContext(
-                        stripe_billable=False, payment_method="prepaid"
+                        stripe_billable=False,
+                        payment_method="prepaid",
+                        prepaid_key=x_api_key,
+                        prepaid_cents=call_cents,
                     )
                 # Out of credit: fall through to the 402, which offers a
                 # top-up. Refusing loudly beats serving on an empty balance.
-            elif record is not None and billing.check_and_increment_quota(
+            elif billing.is_configured() and billing.check_and_increment_quota(
                 record["customer_id"], plan=record.get("plan")
             ):
                 return AuthContext(
@@ -504,21 +993,42 @@ def _authenticate(
                     payment_method="stripe",
                 )
 
+    if x_api_key and client_ip:
+        # The key did not authenticate, so it earns no rate-limit bucket of
+        # its own: the limiter keys on the presented key, and a caller minting
+        # a fresh bogus key per request would otherwise never meet it at all.
+        # Charge the address the request came from instead -- before any
+        # payment instrument below is read, so an over-limit caller costs
+        # this node no facilitator call.
+        if not _audit_limiter.check(client_ip):
+            return _rate_limited_response()
+
+    refusal = None
     if x_payment:
         # Verify only -- do NOT settle here. Settlement happens in _bill, after
         # an audit has actually produced a result, so a caller whose audit
         # fails to run is never charged for nothing.
-        pending = x402_payments.verify_only_sync(x_payment, price=f"${price_usd:.2f}")
+        #
+        # resource_url: the URL this route advertised in its 402. A v1 payer's
+        # requirements are rebuilt from the same values it was challenged
+        # with, and the resource is one of them.
+        pending = x402_payments.verify_only_sync(
+            x_payment,
+            price=f"${price_usd:.2f}",
+            resource_url=f"{PUBLIC_BASE_URL}{path}" if path else PUBLIC_BASE_URL,
+        )
         if pending is not None:
             return AuthContext(
-                stripe_billable=False, payment_method="x402", pending_payment=pending
+                stripe_billable=False, payment_method="x402", pending_payment=pending,
+                challenge_host=host, challenge_path=path,
             )
+        refusal = x402_payments.last_rejection()
 
     if authorization and authorization.startswith("Payment "):
         credential = authorization[len("Payment "):].strip()
         # Top-up first: it is a different intent with a different meaning, and
         # letting it fall through to the per-call path would consume a $0.50
-        # purchase as payment for one $0.03 audit.
+        # purchase as payment for one single audit.
         if credential:
             bought_cents = mpp_payments.settle_topup_sync(credential, realm=host)
             if bought_cents:
@@ -527,14 +1037,48 @@ def _authenticate(
                 # would mean paying twice for one request.
                 call_cents = round(price_usd * 100)
                 remaining = max(bought_cents - call_cents, 0)
-                try:
-                    key = billing.issue_prepaid_key(remaining) if remaining else None
-                except Exception:
-                    key = None
+                key = None
+                mint_error = None
+                if remaining:
+                    # Top up the key the caller already holds, when they sent
+                    # one. Minting a fresh key instead makes every refill a
+                    # re-setup: a CI pipeline has to rotate the secret it
+                    # stored, and whatever was left on the old key is stranded,
+                    # because nothing else can ever spend it.
+                    existing = billing.lookup_key(x_api_key) if x_api_key else None
+                    if existing is not None and existing.get("prepaid_balance_cents") is not None:
+                        if billing.refund_prepaid(x_api_key, remaining):
+                            key = x_api_key
+                    if key is None:
+                        try:
+                            key = billing.issue_prepaid_key(remaining)
+                        except Exception as exc:
+                            # Stripe has ALREADY taken the money: settle_topup_sync
+                            # only returns cents after the PaymentIntent confirmed.
+                            # It must not break the audit the caller paid for, but
+                            # the payer is owed credit and this response is the
+                            # only channel they have -- so it is said on the body
+                            # and logged at ERROR for the operator to make good.
+                            key = None
+                            mint_error = (
+                                "paid %d cents but the prepaid key could not be issued; "
+                                "%d cents of credit is owed" % (bought_cents, remaining)
+                            )
+                            logging.getLogger(__name__).error(
+                                "MPP top-up CHARGED %d cents and FAILED to issue the key "
+                                "(%d cents owed to the payer): %s: %s",
+                                bought_cents, remaining, type(exc).__name__, exc,
+                            )
                 return AuthContext(
                     stripe_billable=False,
                     payment_method="mpp-topup",
                     issued_key=key,
+                    credit_owed=mint_error,
+                    # If this first audit fails, the call it paid for goes
+                    # back on the key, so the payer leaves holding everything
+                    # it bought.
+                    prepaid_key=key,
+                    prepaid_cents=call_cents if key else 0,
                 )
         if credential and mpp_payments.verify_and_settle_sync(credential, realm=host):
             # Already charged/settled (Stripe PaymentIntent or on-chain
@@ -542,8 +1086,24 @@ def _authenticate(
             # further to bill. Note the credential itself carries the
             # price (embedded in its HMAC-bound challenge), so there's
             # nothing further to pass here beyond the realm check.
-            return AuthContext(stripe_billable=False, payment_method="mpp")
+            return AuthContext(
+                stripe_billable=False, payment_method="mpp", mpp_credential=credential
+            )
 
+    if refusal:
+        reason, detail = refusal
+        return _payment_required_response(
+            host=host,
+            price_usd=price_usd,
+            path=path,
+            error=reason,
+            error_detail=detail,
+            retry_after=(
+                _FACILITATOR_RETRY_AFTER_SECONDS
+                if x402_payments.rejection_is_transient(reason)
+                else None
+            ),
+        )
     return _payment_required_response(host=host, price_usd=price_usd, path=path)
 
 
@@ -567,9 +1127,10 @@ def _authorize_and_rate_limit(
     # must be rejected before their payment instrument is touched.
     #
     # x402/MPP payers have no API key to key the limiter on -- fall back to
-    # IP. Either way this is per-instance overload protection, not the
-    # billing boundary: that's Stripe usage records / on-chain settlement.
-    rate_limit_key = x_api_key or (request.client.host if request.client else "unknown")
+    # the client's address (the one the platform vouches for, see
+    # _client_ip). Either way this is per-instance overload protection, not
+    # the billing boundary: that's Stripe usage records / on-chain settlement.
+    rate_limit_key = x_api_key or _client_ip(request)
     if not _audit_limiter.check(rate_limit_key):
         return None, _rate_limited_response()
 
@@ -587,6 +1148,7 @@ def _authorize_and_rate_limit(
         host=_mpp_realm(request),
         price_usd=price_usd,
         path=request.url.path,
+        client_ip=_client_ip(request),
     )
     if isinstance(auth, JSONResponse):
         return None, auth
@@ -607,6 +1169,14 @@ def _attach_issued_key(result: dict, auth) -> None:
     prose beside it because an agent reading this once should not have to
     guess whether the value is a receipt or a credential.
     """
+    owed = getattr(auth, "credit_owed", None)
+    if owed:
+        # The charge went through and the credit did not. Saying so is the
+        # minimum: the payer is owed money and this response is the only
+        # channel they have.
+        result["billing_warning"] = owed
+        result["billed"] = True
+
     key = getattr(auth, "issued_key", None)
     if not key:
         return
@@ -616,6 +1186,74 @@ def _attach_issued_key(result: dict, auth) -> None:
         "X-API-Key header on subsequent requests until the balance runs out; "
         "there is no account and nothing to log in to."
     )
+
+
+def _with_receipt(content, auth):
+    """Return `content`, carrying the x402 settlement receipt headers when
+    this call was paid per-call and settled.
+
+    Routes return plain dicts, which FastAPI serialises with no headers of
+    ours on them. A settled x402 payment has a receipt to deliver -- the
+    facilitator's settle response, transaction hash included -- and the spec
+    puts it in the PAYMENT-RESPONSE header of the 200. So a paid delivery
+    becomes a JSONResponse with those headers; every other delivery is
+    returned exactly as before.
+    """
+    pending = getattr(auth, "pending_payment", None)
+    headers = x402_payments.receipt_headers(pending) if pending is not None else {}
+    if not headers:
+        return content
+    return JSONResponse(content=content, headers=headers)
+
+
+def _deliver(result: dict, auth):
+    """The last line of every paid route: attach what the payer is owed
+    besides the audit -- a prepaid key it just bought, the settlement
+    receipt -- and return.
+
+    Unless the facilitator REFUSED to settle: then the audit is withheld and
+    the caller gets the payable 402 back with the reason. See
+    _settlement_refused."""
+    refused = _settlement_refused(auth)
+    if refused is not None:
+        return refused
+    _attach_issued_key(result, auth)
+    return _with_receipt(result, auth)
+
+
+def _unbill_failed_audit(auth) -> None:
+    """Undo what authentication took, for an audit that did not run.
+
+    x402 needs nothing here: it is settled only in _bill, which the failure
+    paths never reach. A prepaid debit taken at authentication goes back on
+    the key -- including the call a top-up just paid for, so the key the
+    payer receives holds everything it bought -- and an MPP credential is
+    released, so the same receipt is accepted on the retry instead of being
+    refused as already spent. Without this, "charged only for an audit that
+    produced a result" was true for x402 and false for every other rail.
+    """
+    key = getattr(auth, "prepaid_key", None)
+    cents = getattr(auth, "prepaid_cents", 0) or 0
+    if key and cents:
+        billing.refund_prepaid(key, cents)
+    credential = getattr(auth, "mpp_credential", None)
+    if credential:
+        mpp_payments.release_credential(credential)
+
+
+def _failed_audit_response(auth, detail: str) -> JSONResponse:
+    """The 502 every paid route answers with when the audit could not run:
+    nothing charged, and anything the payer is owed regardless -- the prepaid
+    key a top-up just bought -- still delivered."""
+    _unbill_failed_audit(auth)
+    content = {
+        "status": "error",
+        "pass": None,
+        "detail": f"{detail}. Nothing was charged for this request.",
+        "billed": False,
+    }
+    _attach_issued_key(content, auth)
+    return JSONResponse(status_code=502, content=content)
 
 
 def _bill(auth, price_usd: float) -> Optional[str]:
@@ -636,15 +1274,55 @@ def _bill(auth, price_usd: float) -> Optional[str]:
     subscribers -- x402 callers were settled during authentication, so they
     paid for failed audits too. Settling here closes that gap.
 
-    Never raises: the caller already has a real, correct audit result in hand,
-    and a billing hiccup must not withhold or corrupt it. Returns a warning
-    string to surface on the response instead, or None on success/no-op.
+    Never raises. Returns a warning string to surface on the response, or
+    None on success/no-op. One outcome does withhold the result: a settle the
+    facilitator definitely REFUSED leaves `settle_state == "refused"` on the
+    pending payment, and _deliver answers that with the payable 402 instead
+    of the audit (see _settlement_refused). Every other billing hiccup is
+    surfaced beside the result, never by corrupting or withholding it.
     """
     if auth.pending_payment is not None:
         if not x402_payments.settle_sync(auth.pending_payment):
+            # Not settled -- but "not charged" is only true for a refusal.
+            # A settle the facilitator broadcast and has not confirmed, or
+            # one this node stopped waiting for, may still move the money;
+            # the payer is told exactly that, with the hash where there is
+            # one, instead of a false "free".
+            state = getattr(auth.pending_payment, "settle_state", None)
+            if state == "pending":
+                result = getattr(auth.pending_payment, "settle_result", None)
+                transaction = getattr(result, "transaction", None) or "unknown"
+                return (
+                    "payment settlement is pending on-chain "
+                    f"(transaction {transaction}); this call is being charged "
+                    "and the receipt header carries the transaction"
+                )
+            # WHY it failed goes on the body, not only into our log.
+            #
+            # The node is the only party that knows: the payer sees a 200
+            # with an audit in it, and the operator has to be logged into the
+            # box to read the reason. On 2026-09-08 that cost the owner a
+            # night of grepping for a one-line answer the node already had in
+            # hand and threw away. The reason is about the payer's own
+            # payment, and a settle that failed is exactly when a machine
+            # client needs to know whether retrying is safe.
+            reason = getattr(auth.pending_payment, "settle_error", None)
+            because = f" -- {reason}" if reason else ""
+            if state == "unknown":
+                return (
+                    "payment settlement status is unknown: this node did not "
+                    f"get an answer{because}. The transfer may still complete "
+                    "on-chain; do not re-pay for this call"
+                )
             # We delivered without collecting. Deliberately the lesser evil
             # versus charging for undelivered work, but it must be visible.
-            return "payment settlement failed after the audit ran; this call was not charged"
+            # A False with no state is a refusal by settle_sync's contract;
+            # say so on the handle, so _deliver withholds on exactly one flag.
+            auth.pending_payment.settle_state = "refused"
+            return (
+                "payment settlement failed after the audit ran; this call was "
+                f"not charged{because}"
+            )
         return None
 
     if not auth.stripe_billable:
@@ -654,6 +1332,122 @@ def _bill(auth, price_usd: float) -> Optional[str]:
         return None
     except Exception as exc:
         return f"usage recording failed: {exc}"
+
+
+def _settlement_refused(auth) -> Optional[JSONResponse]:
+    """The 402 that answers a payment the facilitator refused to SETTLE.
+
+    Settlement runs after the audit has produced a result (_bill), so a
+    refusal there used to be answered with the audit anyway, plus a warning
+    that nothing was charged. That gave the work away on every refusal -- a
+    payer whose balance moved between verify and settle, a facilitator whose
+    settlement signer had run out of gas (2026-09-11: every call through it
+    was delivered free) -- and made "not charged" a feature from the payer's
+    side. The reference x402 server discards the handler's response on a
+    failed settle and re-issues the 402; this does the same.
+
+    Only a definite refusal withholds. "pending" (the facilitator broadcast
+    a transfer it has not seen confirm) and "unknown" (it did not answer in
+    time) may have moved the money, and withholding a result the payer may
+    have paid for is the worse failure; those still deliver, with the state
+    and the hash on the body. Nothing is charged on a refusal: settle is the
+    only step that moves funds, and the admitted nonce expires on its own,
+    so the payer signs a fresh authorization and retries.
+    """
+    pending = getattr(auth, "pending_payment", None)
+    if pending is None or getattr(pending, "settle_state", None) != "refused":
+        return None
+    reason = getattr(pending, "settle_error", None) or "the facilitator refused to settle it"
+    try:
+        price_usd = float(str(getattr(pending, "price", "") or "").lstrip("$"))
+    except ValueError:
+        price_usd = _DEFAULT_PRICE_USD
+    logging.getLogger(__name__).warning(
+        "x402 audit WITHHELD: settle refused after the audit ran (%s); "
+        "nothing charged, result not delivered", reason,
+    )
+    return _payment_required_response(
+        host=getattr(auth, "challenge_host", None),
+        price_usd=price_usd,
+        path=getattr(auth, "challenge_path", None),
+        error="settlement_refused",
+        error_detail=(
+            "the payment verified but the facilitator refused to settle it "
+            f"after the audit ran: {reason}. Nothing was charged and the result "
+            "was not delivered. Sign a fresh authorization and retry."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Target URL gate.
+#
+# Every audit fetches the caller's URL from inside this deployment: httpx for
+# SEO/security, a real Chromium for WCAG/performance. A public API that
+# fetches arbitrary URLs is a proxy into wherever it runs unless it refuses
+# to: the cloud metadata endpoint (169.254.169.254, metadata.google.internal),
+# loopback (this very service, its own /billing routes), the VPC, link-local.
+# None of those are "sites" anyone audits, and each is a way to make the node
+# do something on the caller's behalf for a 402 that costs them nothing.
+#
+# Checked BEFORE rate limiting and payment, so a refused URL costs the caller
+# nothing and costs this node no facilitator call. The hostname is resolved
+# here and every address it resolves to must be globally routable -- a name
+# check alone is beaten by a DNS record pointing at 10.0.0.1.
+#
+# ALLOW_PRIVATE_TARGETS=1 turns the gate off for a node under local test,
+# where the target genuinely is 127.0.0.1. Never set it on the deployed node.
+# ---------------------------------------------------------------------------
+_ALLOW_PRIVATE_TARGETS = os.environ.get("ALLOW_PRIVATE_TARGETS") == "1"
+_BLOCKED_TARGET_HOSTS = {"localhost", "metadata", "metadata.google.internal"}
+
+
+def _target_url_problem(url: Optional[str]) -> Optional[str]:
+    """Why `url` must not be fetched, or None when it may be.
+
+    Delegates to audits.blocked_target_reason, which is also what every
+    redirect hop is checked against. Two copies of this rule would drift, and
+    the copy that drifts is the one guarding the fetch.
+    """
+    return audits.blocked_target_reason(url)
+
+
+def _reject_unfetchable_target(url: Optional[str]) -> Optional[JSONResponse]:
+    """A 400 the caller can act on, or None when the URL is fetchable.
+
+    400 rather than 402: the request is malformed for this service whatever
+    the caller pays, so it is refused before any payment instrument is read.
+    """
+    problem = _target_url_problem(url)
+    if problem is None:
+        return None
+    return JSONResponse(
+        status_code=400,
+        content={
+            "status": "error",
+            "detail": f"'url' {problem}. Nothing was charged for this request.",
+            "billed": False,
+        },
+    )
+
+
+def _reject_missing_input(payload) -> Optional[JSONResponse]:
+    """A 400 for a body with neither `html` nor `url`, or None.
+
+    Runs before the payment is read, like the target gate: a request this
+    service cannot act on costs the caller nothing and costs this node no
+    facilitator call, and says so.
+    """
+    if getattr(payload, "html", None) or getattr(payload, "url", None):
+        return None
+    return JSONResponse(
+        status_code=400,
+        content={
+            "status": "error",
+            "detail": "Provide 'html' or 'url'. Nothing was charged for this request.",
+            "billed": False,
+        },
+    )
 
 
 def _rate_limited_response() -> JSONResponse:
@@ -678,13 +1472,81 @@ def _rate_limited_response() -> JSONResponse:
     return response
 
 
+_BROWSER_PATH: Optional[str] = None
+_BROWSER_PATH_RESOLVED = False
+
+
+def _resolve_browser_path() -> None:
+    """Ask Playwright once, at startup, where its Chromium lives.
+
+    Blocking and sync (Playwright's driver raises inside a running loop), so it
+    is called from the lifespan through a worker thread, never from a request.
+    """
+    global _BROWSER_PATH, _BROWSER_PATH_RESOLVED
+    if _BROWSER_PATH_RESOLVED:
+        return
+    _BROWSER_PATH_RESOLVED = True
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            _BROWSER_PATH = p.chromium.executable_path
+    except Exception:
+        _BROWSER_PATH = None
+
+
+def _browser_status() -> dict:
+    """Whether the Chromium this Playwright expects is on disk.
+
+    One stat() against a path resolved at startup, so /health stays on the
+    event loop: a sync route would take one of the MAX_CONCURRENT_AUDITS
+    threadpool tokens and queue the probe behind a stranger's page load, which
+    marks the instance unhealthy exactly when it is busiest earning.
+    """
+    if not _BROWSER_PATH:
+        return {"ok": True, "detail": "undetermined"}
+    if os.path.exists(_BROWSER_PATH):
+        return {"ok": True, "detail": "chromium present"}
+    return {"ok": False, "detail": "chromium missing at %s" % _BROWSER_PATH}
+
+
+def _run_axe_all_frames(page) -> dict:
+    """Run axe with the harness present in every frame, and disclose any gaps.
+
+    axe-playwright-python injects its bundle with a single page.evaluate, which
+    reaches the main frame only. axe's cross-frame protocol needs the bundle
+    present in EVERY frame it is asked to reach, so violations inside an iframe
+    -- a cookie banner, an embedded booking widget, a payment form, all of them
+    common and all of them in scope for WCAG -- were simply absent from the
+    result. Absent, not reported: the page came back cleaner than it is, which
+    is the one thing this service promises never to do.
+
+    Injecting into each frame first lets axe reach them. Any frame that refuses
+    the injection (cross-origin without CORS, about:blank, torn down mid-run)
+    is counted and disclosed on the result rather than passed over in silence.
+    """
+    unreachable = 0
+    frames = list(getattr(page, "frames", []) or [])
+    for frame in frames[1:]:  # frames[0] is the main frame, which run() handles
+        try:
+            frame.evaluate(_axe.axe_script)
+        except Exception:
+            unreachable += 1
+
+    result = _axe.run(page, options=AXE_OPTIONS).response
+    if isinstance(result, dict):
+        result["frames_audited"] = max(len(frames) - unreachable, 1)
+        result["frames_unreachable"] = unreachable
+    return result
+
+
 def _run_axe(html: Optional[str], url: Optional[str]) -> dict:
     def _audit(page) -> dict:
         if url:
-            page.goto(url, wait_until="networkidle", timeout=15000)
+            audits.goto_guarded(page, url, wait_until="networkidle", timeout=15000)
         else:
             page.set_content(html, wait_until="networkidle", timeout=15000)
-        return _axe.run(page, options=AXE_OPTIONS).response
+        return _run_axe_all_frames(page)
 
     # Pooled browser, fresh isolated context per call -- see browser_pool.
     return browser_pool.with_page(_audit)
@@ -704,20 +1566,24 @@ def _run_axe_and_performance(url: str):
     rendered, once. The response listener must be attached before navigation
     or the measurement misses the requests it is meant to count.
     """
-    stats = {"bytes": 0, "requests": 0}
+    stats = {"bytes": 0, "requests": 0, "unmeasured": 0}
 
     def _on_response(response):
         stats["requests"] += 1
-        length = response.headers.get("content-length")
-        if length and length.isdigit():
-            stats["bytes"] += int(length)
+        if stats["bytes"] > audits.HEAVY_PAGE_BYTES:
+            return
+        measured = audits.response_bytes(response)
+        if measured is None:
+            stats["unmeasured"] += 1
+        else:
+            stats["bytes"] += measured
 
     def _both(page):
         page.on("response", _on_response)
-        page.goto(url, wait_until="networkidle", timeout=30000)
+        audits.goto_guarded(page, url, wait_until="networkidle", timeout=30000)
         dom_node_count = page.evaluate("document.querySelectorAll('*').length")
         # axe runs against the already-loaded page rather than reloading it.
-        return _axe.run(page, options=AXE_OPTIONS).response, dom_node_count
+        return _run_axe_all_frames(page), dom_node_count
 
     axe_raw, dom_node_count = browser_pool.with_page(_both, user_agent=audits.USER_AGENT)
     performance = audits.performance_result_from_metrics(
@@ -755,27 +1621,27 @@ def _remediation_notes(violations: list) -> Optional[dict]:
 
 
 @app.get("/", response_class=FileResponse)
-def landing_page():
+async def landing_page():
     return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/billing/success", response_class=FileResponse)
-def checkout_success_page():
+async def checkout_success_page():
     return FileResponse(STATIC_DIR / "success.html")
 
 
 @app.get("/billing/cancel", response_class=FileResponse)
-def checkout_cancel_page():
+async def checkout_cancel_page():
     return FileResponse(STATIC_DIR / "cancel.html")
 
 
 @app.get("/llms.txt", response_class=FileResponse)
-def llms_txt():
+async def llms_txt():
     return FileResponse(STATIC_DIR / "llms.txt", media_type="text/plain")
 
 
 @app.get("/mcp.json", tags=["discovery"])
-def mcp_manifest():
+async def mcp_manifest():
     """The MCP tool manifest, with prices and rails taken from live config.
 
     The tool names, descriptions and input schemas come from the static file
@@ -847,12 +1713,12 @@ def mcp_manifest():
 
 
 @app.get("/favicon.svg", response_class=FileResponse, tags=["discovery"])
-def favicon():
+async def favicon():
     return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
 
 
 @app.get("/og-image.png", response_class=FileResponse, tags=["discovery"])
-def og_image():
+async def og_image():
     # Referenced by og:image/twitter:image. Social scrapers fetch this
     # unauthenticated and cache aggressively, so it must stay a stable,
     # public URL -- a link with no preview card is a link people don't click.
@@ -860,12 +1726,12 @@ def og_image():
 
 
 @app.get("/robots.txt", response_class=FileResponse, tags=["discovery"])
-def robots_txt():
+async def robots_txt():
     return FileResponse(STATIC_DIR / "robots.txt", media_type="text/plain")
 
 
 @app.get("/sitemap.xml", response_class=FileResponse)
-def sitemap_xml():
+async def sitemap_xml():
     return FileResponse(STATIC_DIR / "sitemap.xml", media_type="application/xml")
 
 
@@ -879,8 +1745,42 @@ def sitemap_xml():
 # is kept for any environment (local, other hosts) that does not reserve it.
 @app.get("/health", tags=["discovery"])
 @app.get("/healthz", tags=["discovery"])
-def health_check():
-    return {"status": "ok", "service": "wcag-audit-engine"}
+async def health_check():
+    """Liveness AND the one dependency every paid route needs: a browser.
+
+    This returned a constant, so it could only distinguish "uvicorn is
+    listening" from "the box is down". The failure that actually costs money
+    sits between those: Chromium absent, or at a revision this Playwright does
+    not expect. Every audit then 502s, nothing is billed, no customer is
+    served -- and the container reports itself healthy throughout, so nothing
+    restarts and nobody is paged.
+
+    Stays `async`: a sync route would take one of the MAX_CONCURRENT_AUDITS
+    threadpool tokens and queue this probe behind a stranger's page load, which
+    is how a busy, earning instance gets marked unhealthy. The path Playwright
+    expects is resolved once in the lifespan, off the loop, so the probe itself
+    is a single stat().
+
+    Fails OPEN when the answer is unknown: a probe that cannot tell reports ok,
+    because a false 503 restart-loops a node that is serving fine. Only a
+    definite "the executable is not there" degrades.
+    """
+    browser = _browser_status()
+    body = {
+        "status": "ok" if browser["ok"] else "degraded",
+        "service": "wcag-audit-engine",
+        "browser": browser,
+    }
+    # The worker network reports beside the audits, never into them: its
+    # status is informational and CANNOT change this endpoint's status code.
+    # A wedged provider must not restart-loop a container that is still
+    # selling audits perfectly well.
+    if workers is not None:
+        try:
+            body["workers"] = workers.health()
+        except Exception as exc:  # pragma: no cover - defensive
+            body["workers"] = {"configured": False, "error": f"{type(exc).__name__}"}
+    return JSONResponse(status_code=200 if browser["ok"] else 503, content=body)
 
 
 _AUTH_DESCRIPTION = (
@@ -888,8 +1788,8 @@ _AUTH_DESCRIPTION = (
     "cannot know it: read `payment.methods` in /.well-known/agent.json, or "
     "the `accepts[]` array in any 402 response. Both list only rails that can "
     "genuinely settle right now. The headers each scheme uses: X-API-Key (a "
-    "key issued with a human plan; plans are priced per site watched, so a "
-    "machine caller wanting volume should use a per-call rail); X-PAYMENT "
+    "prepaid key bought through the MPP top-up rail and spent per call at "
+    "the same rates; there are no subscriptions); X-PAYMENT "
     "(x402 -- price/network/payTo arrive in the 402 body); Authorization: "
     "Payment ... (MPP -- Stripe SPT for fiat or Tempo for crypto, challenges "
     "arrive in the WWW-Authenticate headers on a 402)"
@@ -903,50 +1803,65 @@ _HTML_OR_URL_INPUT_SCHEMA = {"html": "string (optional)", "url": "string (option
 _CATALOG = [
     {
         "path": "/audit/wcag",
-        "price_usd": 0.03,
+        "price_usd": 0.05,
         "input": _HTML_OR_URL_INPUT_SCHEMA,
-        "description": "WCAG 2.1 A/AA accessibility audit via axe-core.",
+        "description": (
+            "Website accessibility audit (a11y, WCAG compliance check): WCAG "
+            "2.1 level A and AA conformance of any live URL or raw HTML, tested "
+            "with axe-core in a real headless browser. Returns every violation "
+            "with rule id, impact, help text and affected node count. "
+            "Deterministic rules; a check that cannot run returns an error, "
+            "never a pass."
+        ),
         "returns": "pass (bool), violations[] with id/impact/help/help_url/nodes_affected.",
     },
     {
         "path": "/audit/seo",
-        "price_usd": 0.03,
+        "price_usd": 0.05,
         "input": _HTML_OR_URL_INPUT_SCHEMA,
         "description": (
-            "Title, meta description, H1 structure, canonical link, "
-            "OpenGraph tags, structured data, and lang attribute."
+            "SEO audit of a web page (on-page SEO check) for any live URL or "
+            "raw HTML: title tag, meta description, H1 heading structure, "
+            "canonical link, OpenGraph and social tags, JSON-LD structured "
+            "data, html lang attribute. Rule-by-rule findings with severity and "
+            "what is missing or malformed."
         ),
         "returns": "pass (bool), findings[] with id/severity/detail.",
     },
     {
         "path": "/audit/security",
-        "price_usd": 0.03,
+        "price_usd": 0.05,
         "input": _URL_INPUT_SCHEMA,
         "description": (
-            "HTTPS, HSTS, CSP, X-Content-Type-Options, clickjacking "
-            "protection, Referrer-Policy, and CORS from a live HTTP "
-            "response -- not a TLS/cipher scan or a penetration test."
+            "Security headers check for a website: audits HTTPS, HSTS, Content- "
+            "Security-Policy (CSP), X-Content-Type-Options, X-Frame-Options / "
+            "clickjacking protection, Referrer-Policy and CORS from the real "
+            "HTTP response of any live URL. Findings with severity for what is "
+            "missing. Header posture only, not a penetration test."
         ),
         "returns": "pass (bool), findings[] with id/severity/detail.",
     },
     {
         "path": "/audit/performance",
-        "price_usd": 0.03,
+        "price_usd": 0.05,
         "input": _URL_INPUT_SCHEMA,
         "description": (
-            "DOM node count, transferred bytes, and request count "
-            "from one real page load -- not a full Lighthouse audit."
+            "Page speed and page weight audit of a web page from one real "
+            "browser load: total bytes transferred, HTTP request count and DOM "
+            "node count, measured rather than estimated, with findings when the "
+            "page is heavy. Page-weight signals, not Core Web Vitals."
         ),
         "returns": "pass (bool), metrics{}, findings[] with id/severity/detail.",
     },
     {
         "path": "/audit/bundle",
-        "price_usd": 0.10,
+        "price_usd": 0.15,
         "input": _URL_INPUT_SCHEMA,
         "description": (
-            "Runs wcag + seo + security + performance against one URL, "
-            "billed as a single call. Atomic: if any dimension fails to "
-            "run, the whole call fails and nothing is billed."
+            "Full website audit in one call: accessibility (WCAG 2.1 A/AA via "
+            "axe-core), on-page SEO, HTTP security headers and page speed / "
+            "page weight, from a single browser load of one URL. Cheaper than "
+            "four separate calls; if any part cannot run, nothing is billed."
         ),
         "returns": "pass (bool) plus wcag{}, seo{}, security{}, performance{} sub-results.",
     },
@@ -998,10 +1913,16 @@ def _openapi_with_payment_info() -> dict:
     reverse_aliases: dict = {}
     for alias, target in _CATALOG_ALIASES.items():
         reverse_aliases.setdefault(target, []).append(alias)
-    for entry in _CATALOG:
-        offers = mpp_payments.discovery_offers(
-            entry["price_usd"], description=entry["description"]
+    for entry in _CATALOG + _worker_discovery_entries():
+        offers = list(
+            mpp_payments.discovery_offers(entry["price_usd"], description=entry["description"])
         )
+        # The x402 rail, too. On an x402-only deploy the MPP offers are empty
+        # and every paid route used to read as free here while the 402,
+        # agent.json, llms.txt and mcp.json all priced it.
+        x402_offer = x402_payments.discovery_offer(f"${entry['price_usd']:.2f}")
+        if x402_offer:
+            offers.append(x402_offer)
         if not offers:
             continue
         for path in (entry["path"], *reverse_aliases.get(entry["path"], [])):
@@ -1009,6 +1930,11 @@ def _openapi_with_payment_info() -> dict:
             if operation is None:
                 continue
             operation["x-payment-info"] = {"offers": offers}
+            if entry.get("buyer_note"):
+                # Workers above the x402 clients' $1 default cap: see
+                # workers.catalog.buyer_note. A standard extension key, kept
+                # out of x-payment-info so mppx's offer validation is untouched.
+                operation["x-buyer-note"] = entry["buyer_note"]
             # The discovery spec requires a declared 402 on any operation
             # carrying x-payment-info; mppx validate fails the document
             # without it ("Operation with x-payment-info MUST have a 402
@@ -1028,8 +1954,19 @@ def _openapi_with_payment_info() -> dict:
                 .get("content", {})
                 .get("application/json")
             )
+            if json_content is None and entry.get("input_schema") is not None:
+                # Worker handlers read their body by hand, so FastAPI documents
+                # none, and a request generator reading this spec would send
+                # nothing. Their catalog schema IS the contract; publish it.
+                operation["requestBody"] = {
+                    "required": True,
+                    "content": {"application/json": {"schema": entry["input_schema"]}},
+                }
+                json_content = operation["requestBody"]["content"]["application/json"]
             if json_content is not None:
-                json_content.setdefault("example", {"url": "https://example.com"})
+                json_content.setdefault(
+                    "example", entry.get("input_example") or {"url": "https://example.com"}
+                )
     doc["x-service-info"] = {
         "categories": ["accessibility", "seo", "security", "performance"],
         "docs": {
@@ -1041,6 +1978,30 @@ def _openapi_with_payment_info() -> dict:
     return doc
 
 
+def _worker_discovery_entries() -> list:
+    """Live workers, shaped like catalog rows for the annotator above.
+
+    Without these, every /work route read as free in openapi.json while its
+    402, agent.json and /work all priced it -- invisible to the crawlers that
+    find paid endpoints by x-payment-info. Only workers this deployment can
+    deliver, by the same rule the manifest follows.
+    """
+    if workers is None or not workers.is_configured():
+        return []
+    return [
+        {
+            "path": worker.path,
+            "price_usd": worker.price_usd,
+            "description": worker.description,
+            "input_schema": worker.input_schema,
+            "input_example": workers.catalog.example_for(worker),
+            **({"buyer_note": workers.catalog.buyer_note(worker)}
+               if workers.catalog.buyer_note(worker) else {}),
+        }
+        for worker in workers.catalog.live()
+    ]
+
+
 app.openapi = _openapi_with_payment_info
 
 
@@ -1050,7 +2011,8 @@ def _max_catalog_price_cents() -> int:
     Used to answer whether a rail with a minimum charge has anything at all it
     could settle here.
     """
-    return max(round(entry["price_usd"] * 100) for entry in _CATALOG)
+    prices = [round(entry["price_usd"] * 100) for entry in _CATALOG]
+    return max(prices)
 
 
 def _payment_methods_live() -> list:
@@ -1065,20 +2027,20 @@ def _payment_methods_live() -> list:
     # The SPT rail is listed only if SOME sellable route clears Stripe's
     # minimum card charge. This list is deployment-wide while the floor is
     # per-amount, so the honest question is "is there anything here this rail
-    # could ever settle" -- and with the catalog priced at $0.03-$0.10, the
+    # could ever settle" -- and with the catalog priced in cents, the
     # answer today is no. Listing it anyway would put a method in the array an
     # agent picks from that fails at the Stripe API every single time.
     if mpp_payments.stripe_available_for(_max_catalog_price_cents()):
         methods.append("mpp-stripe")
     if mpp_payments.tempo_configured():
         methods.append("mpp-tempo")
-    if billing.is_configured():
+    if billing.is_configured() and billing.human_plans_live():
         methods.append("stripe_api_key")
     return methods
 
 
 @app.get("/.well-known/agent.json", tags=["discovery"])
-def agent_manifest(request: Request):
+async def agent_manifest(request: Request):
     base = PUBLIC_BASE_URL
     live_methods = _payment_methods_live()
     return {
@@ -1096,30 +2058,12 @@ def agent_manifest(request: Request):
         "pricing": {
             "model": "per-call",
             "currency": "USD",
-            "single_audit_usd": 0.03,
-            "bundle_usd": 0.10,
+            "single_audit_usd": _price_of("/audit/wcag"),
+            "bundle_usd": _price_of("/audit/bundle"),
             "note": (
                 "Per-call pricing is the product and is what a machine caller "
                 "should use -- no account, no minimum, no subscription."
             ),
-            "human_plans": {
-                "billed_by": "sites watched, not scans",
-                "audience": (
-                    "People who want a recurring report rather than an "
-                    "integration. Not a cheaper way to buy calls."
-                ),
-                "checkout": f"{base}/billing/checkout",
-                "tiers": [
-                    {
-                        "id": plan["id"],
-                        "name": plan["name"],
-                        "usd": plan["usd"],
-                        "interval": plan["interval"],
-                        "covers": plan["covers"],
-                    }
-                    for plan in billing.human_plans_live()
-                ],
-            },
         },
         "payment": {
             "methods": live_methods,
@@ -1131,6 +2075,21 @@ def agent_manifest(request: Request):
             "note": (
                 "Only methods actually configured on this deployment are listed; "
                 "an empty list means no machine payment rail is live right now."
+            ),
+            "receipt": (
+                "A settled x402 payment returns the facilitator's settle "
+                "response -- transaction hash, network, payer -- on the 200 in "
+                "the PAYMENT-RESPONSE header (X-PAYMENT-RESPONSE for v1 clients). "
+                "Over MCP the same receipt is in the tool result's "
+                "_meta[\"x402/payment-response\"]."
+            ),
+            "mcp": (
+                "The /mcp endpoint speaks the x402 MCP protocol: an unpaid "
+                "tools/call returns isError with the v2 PaymentRequired in "
+                "structuredContent; send the signed PaymentPayload in "
+                "params._meta[\"x402/payment\"] (the x402.mcp client does this "
+                "for you). HTTP headers X-PAYMENT / PAYMENT-SIGNATURE / "
+                "X-API-Key on the POST work too."
             ),
         },
         "limits": {
@@ -1147,8 +2106,11 @@ def agent_manifest(request: Request):
         "guarantees": [
             "You are charged only for an audit that produced a result. A check "
             "that could not run returns HTTP 502, is never settled, and is "
-            "never reported as a pass -- a payment is verified to grant access "
-            "but only settled after the audit has actually delivered.",
+            "never reported as a pass -- an x402 payment is verified to grant "
+            "access and settled only once the audit has actually produced a "
+            "result (a settlement the facilitator refuses withholds the result "
+            "and charges nothing), a prepaid key debited for it is refunded, "
+            "and an MPP credential it consumed is accepted again on the retry.",
             "Rate-limited requests are rejected before any payment is settled, "
             "so a 429 never costs you anything.",
             "Results are deterministic rule-based checks against the live page, "
@@ -1187,7 +2149,7 @@ def agent_manifest(request: Request):
                 "path": "/audit",
                 "method": "POST",
                 "payment_required": True,
-                "price_usd": 0.03,
+                "price_usd": _price_of("/audit"),
                 "input": _HTML_OR_URL_INPUT_SCHEMA,
                 "input_schema": _schema_for(_HTML_OR_URL_INPUT_SCHEMA),
                 "output_schema": _MCP_OUTPUT_SCHEMAS["/audit/wcag"],
@@ -1195,6 +2157,64 @@ def agent_manifest(request: Request):
                 "payment_methods": live_methods,
                 "note": "Alias of /audit/wcag, kept for backward compatibility.",
             },
+        ],
+        # The worker network is listed SEPARATELY from `endpoints`, not folded
+        # into it. These are not audits: an audit is a deterministic rule
+        # check against a page, while a worker is a task carried out against
+        # somebody's live API or model. Mixing them in one array would tell a
+        # buying agent that a market quote carries the audits' determinism
+        # guarantee, which it does not.
+        "workers": _worker_manifest_entries(live_methods),
+    }
+
+
+def _worker_manifest_entries(live_methods: list) -> dict:
+    """The worker network as its own section of the manifest.
+
+    Empty and clearly marked when the network is not configured, rather than
+    absent: an agent that read this manifest yesterday should be able to tell
+    "turned off here" apart from "this node is too old to have it".
+    """
+    if workers is None or not workers.is_configured():
+        return {"available": False, "count": 0, "capabilities": []}
+    # Only workers this deployment can actually deliver. A capability whose
+    # provider has no credential here is omitted rather than listed, for the
+    # same reason `payment.methods` lists only rails that can settle.
+    live_workers = workers.catalog.live()
+    return {
+        "available": True,
+        "count": len(live_workers),
+        "index": f"{PUBLIC_BASE_URL}/work",
+        "note": (
+            "Machine-payable tasks carried out against live providers, priced "
+            "per call on the same x402 rail as the audits. Unlike the audits, "
+            "these are not deterministic rule checks -- each states its own "
+            "sources in the result."
+        ),
+        "idempotency": (
+            "Send an Idempotency-Key header to make a retry safe: a repeated "
+            "key returns the stored result and is not charged again."
+        ),
+        "capabilities": [
+            {
+                "path": worker.path,
+                "method": "POST",
+                "name": worker.name,
+                "title": worker.title,
+                "payment_required": True,
+                "price_usd": worker.price_usd,
+                "tier": worker.tier,
+                "description": worker.description,
+                "tags": worker.tags,
+                "input_schema": worker.input_schema,
+                "returns": worker.returns,
+                "max_seconds": worker.max_seconds,
+                "composes": worker.composes,
+                "payment_methods": live_methods,
+                **({"buyer_note": workers.catalog.buyer_note(worker)}
+                   if workers.catalog.buyer_note(worker) else {}),
+            }
+            for worker in live_workers
         ],
     }
 
@@ -1434,8 +2454,14 @@ _MCP_WCAG_OUTPUT_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "axe-core rule id."},
-                    "impact": {"type": "string", "description": "axe-core impact level."},
-                    "help": {"type": "string"},
+                    # Nullable because the value is `v.get("impact")`: axe-core
+                    # sets it on every violation in practice, but the schema
+                    # describes what the route can emit, and a strict client
+                    # validating structuredContent against this would reject
+                    # a paid, delivered audit over a null it was never told
+                    # about.
+                    "impact": {"type": ["string", "null"], "description": "axe-core impact level."},
+                    "help": {"type": ["string", "null"]},
                     "help_url": {"type": "string", "format": "uri"},
                     "nodes_affected": {"type": "integer", "minimum": 0},
                 },
@@ -1642,9 +2668,28 @@ def _mcp_tool_error(request_id, message: str, details: Optional[dict] = None) ->
     }
 
 
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError):
+    """/mcp answers in JSON-RPC, even when the request never parsed.
+
+    FastAPI's default is a 422 with a `detail` list -- a REST shape a
+    JSON-RPC client cannot read; the official MCP client surfaces it as an
+    opaque transport error. Invalid JSON is -32700 (parse error), anything
+    else -32600 (invalid request). Every other route keeps the default.
+    """
+    if request.url.path != "/mcp":
+        return await request_validation_exception_handler(request, exc)
+    errors = exc.errors() if hasattr(exc, "errors") else []
+    parse_error = any(e.get("type") == "json_invalid" for e in errors)
+    code, message = (-32700, "Parse error: the body is not valid JSON") if parse_error else (
+        -32600, "Invalid Request: expected a JSON-RPC request object"
+    )
+    return JSONResponse(status_code=400, content=_jsonrpc_error(None, code, message))
+
+
 @app.post("/mcp", tags=["discovery"])
-def mcp_streamable_http(
-    payload: dict = Body(...),
+async def mcp_streamable_http(
+    payload: Any = Body(...),
     request: Request = None,
     x_api_key: Optional[str] = Header(None),
     x_payment: Optional[str] = Header(None),
@@ -1657,16 +2702,36 @@ def mcp_streamable_http(
     deciding to buy. Execution (tools/call) goes through exactly the same
     fail-closed authorisation as the REST routes, including verify-then-settle,
     rather than a second copy of the payment logic that could drift from it.
+
+    A coroutine, like every other discovery route: see _mcp_tools_call for
+    why. The handshake and the tool list are answered on the event loop;
+    only tools/call is handed to the audit thread pool.
     """
+    # Shape first. A JSON array (the batch form MCP dropped in 2025-06-18), a
+    # bare string, a params that is not an object: each of these used to
+    # reach `.get` on the wrong type and come back as an HTTP 500 with a
+    # text/plain body. A JSON-RPC client can act on -32600; it cannot act on
+    # "Internal Server Error".
+    if not isinstance(payload, dict):
+        return _jsonrpc_error(
+            None, -32600,
+            "Invalid Request: expected one JSON-RPC request object (batches are not supported)",
+        )
     method = payload.get("method")
     request_id = payload.get("id")
+    params = payload.get("params")
+    if params is not None and not isinstance(params, dict):
+        return _jsonrpc_error(request_id, -32602, "Invalid params: `params` must be an object")
 
     # Notifications carry no id and must not be answered with a body.
     if request_id is None and isinstance(method, str) and method.startswith("notifications/"):
         return Response(status_code=202)
 
+    if not isinstance(method, str):
+        return _jsonrpc_error(request_id, -32600, "Invalid Request: `method` must be a string")
+
     if method == "initialize":
-        client_version = (payload.get("params") or {}).get("protocolVersion")
+        client_version = (params or {}).get("protocolVersion")
         version = (
             client_version if client_version in MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSIONS[0]
         )
@@ -1696,74 +2761,245 @@ def mcp_streamable_http(
         return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": _mcp_tools()}}
 
     if method == "tools/call":
-        params = payload.get("params") or {}
-        name = params.get("name")
-        args = params.get("arguments") or {}
+        from starlette.concurrency import run_in_threadpool
 
-        price = _MCP_TOOL_PRICES.get(name)
-        if price is None:
-            return _mcp_tool_error(request_id, f"Unknown tool: {name}")
-        if not args.get("url") and not args.get("html"):
-            return _mcp_tool_error(request_id, "Provide 'url' (or 'html' for wcag/seo).")
-
-        auth, err = _authorize_and_rate_limit(
-            x_api_key, x_payment, authorization, request, price_usd=price
+        return await run_in_threadpool(
+            _mcp_tools_call, payload, request, x_api_key, x_payment, authorization
         )
-        if err is not None:
-            import json as _json
-
-            try:
-                challenge = _json.loads(err.body.decode())
-            except Exception:
-                # Never let a formatting problem turn a payment prompt into a
-                # crash: the caller still needs to know what it costs.
-                challenge = {"error": "payment_required", "price_usd": price}
-
-            # Index this as an MCP resource in the Bazaar, not as the HTTP
-            # route the shared 402 builder described. An agent that finds the
-            # tool there calls it over MCP, so the discovery record has to
-            # name the tool and its transport.
-            tool = next((t for t in _mcp_tools() if t["name"] == name), None)
-            if tool is not None:
-                mcp_bazaar = x402_payments.bazaar_extension_for_mcp_tool(
-                    tool_name=name,
-                    description=tool["description"],
-                    input_schema=tool["inputSchema"],
-                    example={"url": "https://example.com"},
-                )
-                if mcp_bazaar:
-                    challenge["extensions"] = mcp_bazaar
-
-            return _mcp_tool_error(
-                request_id,
-                f"Payment required (${price:.2f} for {name}). Attach X-API-Key, "
-                f"or pay per call with a rail listed in `accepts`.",
-                details=challenge,
-            )
-
-        try:
-            result = _mcp_run_tool(name, args)
-        except Exception as exc:
-            # Not billed: _bill only runs on success, same as the REST routes.
-            return _mcp_tool_error(request_id, f"Audit could not complete: {exc}")
-
-        warning = _bill(auth, price_usd=price)
-        if warning:
-            result["billing_warning"] = warning
-        _attach_issued_key(result, auth)
-
-        import json as _json
-
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "content": [{"type": "text", "text": _json.dumps(result, indent=2)}],
-                "isError": False,
-            },
-        }
 
     return _jsonrpc_error(request_id, -32601, f"Method not found: {method}")
+
+
+def _mcp_tools_call(
+    payload: dict,
+    request: Request,
+    x_api_key: Optional[str],
+    x_payment: Optional[str],
+    authorization: Optional[str],
+):
+    """Execute one paid tool call. Runs in the audit thread pool, never on
+    the event loop.
+
+    Why the split: MAX_CONCURRENT_AUDITS caps anyio's thread pool, and every
+    SYNC route handler runs in that pool -- so while four audits held their
+    Chromium contexts, `/health`, `/.well-known/agent.json`, `/mcp.json` and
+    the MCP handshake queued behind them. Cloud Run's health probe, a crawler
+    scoring the manifest, and an agent's `initialize` all waited on a
+    stranger's page load, and a probe that times out is an instance marked
+    unhealthy at exactly the moment it is earning. Discovery is pure CPU on
+    static data; it belongs on the event loop. Only this -- the part that
+    runs a browser and waits on the facilitator -- belongs in the pool.
+    """
+    request_id = payload.get("id")
+    params = payload.get("params") or {}
+    name = params.get("name")
+    args = params.get("arguments") or {}
+    if not isinstance(args, dict):
+        return _jsonrpc_error(request_id, -32602, "Invalid params: `arguments` must be an object")
+    for field in ("url", "html"):
+        if args.get(field) is not None and not isinstance(args[field], str):
+            return _jsonrpc_error(
+                request_id, -32602, f"Invalid params: `{field}` must be a string"
+            )
+
+    price = _MCP_TOOL_PRICES.get(name)
+    if price is None:
+        return _mcp_tool_error(request_id, f"Unknown tool: {name}")
+    if not args.get("url") and not args.get("html"):
+        return _mcp_tool_error(request_id, "Provide 'url' (or 'html' for wcag/seo).")
+    # Same gates as the REST routes, before any payment is read: a URL
+    # this service will not fetch, or a body no browser would render.
+    html_arg = args.get("html")
+    if isinstance(html_arg, str) and len(html_arg) > MAX_HTML_BYTES:
+        return _mcp_tool_error(
+            request_id,
+            f"'html' is {len(html_arg)} bytes; the limit is {MAX_HTML_BYTES}. "
+            "Nothing was charged.",
+        )
+    url_problem = _target_url_problem(args.get("url"))
+    if url_problem is not None:
+        return _mcp_tool_error(
+            request_id, f"'url' {url_problem}. Nothing was charged."
+        )
+
+    # The x402 MCP transport carries the payment INSIDE the JSON-RPC
+    # call, as `params._meta["x402/payment"]` -- an MCP client has no
+    # access to HTTP headers at all, so a header was never something it
+    # could send. Re-encoded into the header form so the one verify path
+    # (nonce ledger, facilitator loop, logging) serves both transports;
+    # an explicit header still wins when a caller sends both.
+    meta_payment = x402_payments.payment_header_from_meta(
+        (params.get("_meta") or {}).get(x402_payments.MCP_PAYMENT_META_KEY)
+        if isinstance(params.get("_meta"), dict)
+        else None
+    )
+
+    auth, err = _authorize_and_rate_limit(
+        x_api_key, x_payment or meta_payment, authorization, request, price_usd=price
+    )
+    if err is not None:
+        if err.status_code == 429:
+            # Over the limit is not "pay me": an x402 MCP client answered
+            # with a challenge signs a payment and retries once, gets the
+            # same challenge, and reports its wallet as refused. Tell it to
+            # wait, with the same Retry-After the REST route sends.
+            envelope = _mcp_tool_error(
+                request_id,
+                f"Rate limit exceeded ({RATE_LIMIT_PER_MINUTE} requests/minute). "
+                "Nothing was charged. Retry after 60 seconds.",
+                {"error": "rate_limited", "retry_after_seconds": 60, "billed": False},
+            )
+            return JSONResponse(content=envelope, headers={"Retry-After": "60"})
+        return _mcp_payment_required(request_id, name, price, err)
+
+    try:
+        result = _mcp_run_tool(name, args)
+    except Exception as exc:
+        # Not billed: _bill only runs on success, same as the REST routes,
+        # and whatever authentication already took is handed back.
+        _unbill_failed_audit(auth)
+        details = {"billed": False}
+        _attach_issued_key(details, auth)
+        return _mcp_tool_error(
+            request_id, f"Audit could not complete: {exc}. Nothing was charged.", details
+        )
+
+    warning = _bill(auth, price_usd=price)
+    refused = _settlement_refused(auth)
+    if refused is not None:
+        # Same rule as the REST routes: a refused settle withholds the audit
+        # and re-issues the paywall, here in the shape the MCP client pays.
+        return _mcp_payment_required(request_id, name, price, refused)
+    if warning:
+        result["billing_warning"] = warning
+    _attach_issued_key(result, auth)
+
+    import json as _json
+
+    # `structuredContent` is not optional here. Every tool advertises an
+    # outputSchema, and the official MCP SDK client (mcp >= 1.10) enforces
+    # the spec's consequence on every non-error result: a tool with an
+    # output schema that returns no structuredContent raises RuntimeError in
+    # the CLIENT, after the call. On a paid call that is the worst order of
+    # events this node can produce -- the payment settled, the audit ran,
+    # and the agent's SDK threw the result away on delivery. The dict IS the
+    # structured result; the text is the same JSON for clients that only
+    # read content.
+    tool_result = {
+        "content": [{"type": "text", "text": _json.dumps(result, indent=2)}],
+        "structuredContent": result,
+        "isError": False,
+    }
+    # The settlement receipt, where the x402 MCP client reads it:
+    # `_meta["x402/payment-response"]` on the CallToolResult. The HTTP
+    # header copy below still goes out for clients that can see headers.
+    receipt = x402_payments.receipt_meta(getattr(auth, "pending_payment", None))
+    if receipt:
+        tool_result["_meta"] = receipt
+    envelope = {"jsonrpc": "2.0", "id": request_id, "result": tool_result}
+    return _with_receipt(envelope, auth)
+
+
+def _mcp_payment_required(request_id, name: str, price: float, err: JSONResponse) -> dict:
+    """The MCP paywall, in the shape the x402 MCP client actually pays.
+
+    The x402 MCP protocol (x402.mcp, server and client alike) is precise
+    about this and it is NOT the HTTP 402 shape: the tool result is
+    `isError: true` with a **v2** `PaymentRequired` object in
+    `structuredContent` (and the same JSON as the text content). The client
+    reads `structuredContent` first, parses it with the library's own
+    `parse_payment_required`, signs for the first entry in `accepts`, and
+    retries with the payload in `params._meta["x402/payment"]`.
+
+    What this endpoint served before was the REST 402 body -- a v1 object
+    with a v1 `accepts[]` -- as prose-free JSON text. A v2 MCP client either
+    parsed that as v1 and signed a v1 payment, or found no v2 challenge at
+    all; and whatever it signed was sent in `_meta`, which nothing here read.
+    Every conforming x402 MCP client was answered with the same paywall
+    twice and gave up, and from this side that is indistinguishable from no
+    MCP agent ever calling. The same shape of fault as the unpayable REST
+    402 (#61), one transport over.
+
+    The v2 object is the same challenge the HTTP path encodes into the
+    PAYMENT-REQUIRED header, built by the same function, so the price, the
+    recipient and the network cannot differ between the two transports.
+    `resource.url` is this node's MCP endpoint -- what an agent that finds the
+    tool in the Bazaar connects to -- and the discovery record names the
+    tool and its transport, so it is indexed as an MCP resource rather than
+    as the HTTP route the REST 402 would have described.
+
+    The extra keys (`message`, `price_usd`, `other_rails`, `docs`) are kept
+    for an LLM reading the result: the x402 models ignore unknown fields, so
+    they cost the paying client nothing. When x402 is off there is no v2
+    object to send; the REST body (with its empty `accepts`) goes out
+    unchanged, which the client correctly reads as "nothing here I can pay".
+    """
+    import json as _json
+
+    try:
+        rest_body = _json.loads(err.body.decode())
+    except Exception:
+        # Never let a formatting problem turn a payment prompt into a
+        # crash: the caller still needs to know what it costs.
+        rest_body = {"error": "payment_required", "price_usd": price}
+
+    tool = next((t for t in _mcp_tools() if t["name"] == name), None)
+    mcp_bazaar = {}
+    if tool is not None:
+        mcp_bazaar = x402_payments.bazaar_extension_for_mcp_tool(
+            tool_name=name,
+            description=tool["description"],
+            input_schema=tool["inputSchema"],
+            example={"url": "https://example.com"},
+        )
+
+    # The REST body's `error` is "payment_required" on a fresh challenge and
+    # the refusal reason when a payment was tried; carry it into the v2
+    # object so an MCP payer learns why exactly as an HTTP payer does.
+    rest_error = rest_body.get("error") if isinstance(rest_body, dict) else None
+    challenge = x402_payments.payment_required_v2_dict(
+        price=f"${price:.2f}",
+        resource_url=f"{PUBLIC_BASE_URL}/mcp",
+        description=tool["description"] if tool is not None else _route_description(None),
+        extensions=mcp_bazaar or None,
+        error=rest_error if rest_error and rest_error != "payment_required" else None,
+    )
+    if challenge:
+        # v2 wins the keys both objects carry (x402Version, accepts, error,
+        # extensions); the REST body contributes the human-facing rest.
+        for key, value in rest_body.items():
+            if key not in ("x402Version", "accepts", "extensions", "error", "resource"):
+                challenge.setdefault(key, value)
+    else:
+        challenge = rest_body
+        if mcp_bazaar:
+            challenge["extensions"] = mcp_bazaar
+
+    # Rails an MCP caller can actually use. The MPP rails are paid through
+    # HTTP headers (`Authorization: Payment`, challenge in WWW-Authenticate)
+    # that a tool result cannot carry, so listing them here names a rail
+    # this transport cannot settle. The API-key rail rides the JSON-RPC
+    # request's own X-API-Key header and stays.
+    if isinstance(challenge.get("other_rails"), list):
+        challenge["other_rails"] = [
+            rail for rail in challenge["other_rails"]
+            if not (isinstance(rail, dict) and rail.get("protocol") == "mpp")
+        ]
+
+    message = (
+        f"Payment required (${price:.2f} for {name}). Attach X-API-Key, "
+        f"or pay per call with a rail listed in `accepts`."
+    )
+    challenge = {"message": message, **challenge}
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": {
+            "content": [{"type": "text", "text": _json.dumps(challenge, indent=2)}],
+            "structuredContent": challenge,
+            "isError": True,
+        },
+    }
 
 
 @app.post("/billing/checkout")
@@ -1907,12 +3143,19 @@ def audit(
     x_payment: Optional[str] = Header(None),
     authorization: Optional[str] = Header(None),
 ):
-    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=0.03)
+    refused = _reject_unfetchable_target(payload.url)
+    if refused is not None:
+        return refused
+    # Before any payment is read: a body with nothing to audit is refused for
+    # free. Checked after the facilitator, this 400 burned a verify round
+    # trip and the signature's nonce, so the payer's corrected retry with the
+    # same authorization was refused as a replay.
+    missing = _reject_missing_input(payload)
+    if missing is not None:
+        return missing
+    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=_price_of("/audit"))
     if err:
         return err
-
-    if not payload.html and not payload.url:
-        raise HTTPException(status_code=400, detail="Provide 'html' or 'url'")
 
     try:
         raw = _run_axe(payload.html, payload.url)
@@ -1920,14 +3163,7 @@ def audit(
         # Honest failure: an audit that didn't run is never reported as a
         # compliance pass, and it is never billed -- callers only pay for
         # an audit that actually happened.
-        return JSONResponse(
-            status_code=502,
-            content={
-                "status": "error",
-                "pass": None,
-                "detail": f"Audit could not complete: {exc}",
-            },
-        )
+        return _failed_audit_response(auth, f"Audit could not complete: {exc}")
 
     violations = raw.get("violations", [])
     result = {
@@ -1947,15 +3183,13 @@ def audit(
         ],
     }
 
-    warning = _bill(auth, price_usd=0.03)
+    warning = _bill(auth, price_usd=_price_of("/audit"))
     if warning:
         result["billing_warning"] = warning
-    _attach_issued_key(result, auth)
-
     remediation = _remediation_notes(violations)
     if remediation is not None:
         result["remediation"] = remediation
-    return result
+    return _deliver(result, auth)
 
 
 @app.post("/audit/wcag")
@@ -1966,23 +3200,27 @@ def audit_wcag(
     x_payment: Optional[str] = Header(None),
     authorization: Optional[str] = Header(None),
 ):
-    """Identical to /audit -- same axe-core check, same $0.03 price, kept
+    """Identical to /audit -- same axe-core check, same price, kept
     as its own path alongside the other 4 audit dimensions so a caller can
     request accessibility specifically without relying on /audit's name."""
-    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=0.03)
+    refused = _reject_unfetchable_target(payload.url)
+    if refused is not None:
+        return refused
+    # Before any payment is read: a body with nothing to audit is refused for
+    # free. Checked after the facilitator, this 400 burned a verify round
+    # trip and the signature's nonce, so the payer's corrected retry with the
+    # same authorization was refused as a replay.
+    missing = _reject_missing_input(payload)
+    if missing is not None:
+        return missing
+    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=_price_of("/audit/wcag"))
     if err:
         return err
-
-    if not payload.html and not payload.url:
-        raise HTTPException(status_code=400, detail="Provide 'html' or 'url'")
 
     try:
         raw = _run_axe(payload.html, payload.url)
     except Exception as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"status": "error", "pass": None, "detail": f"Audit could not complete: {exc}"},
-        )
+        return _failed_audit_response(auth, f"Audit could not complete: {exc}")
 
     violations = raw.get("violations", [])
     result = {
@@ -2001,11 +3239,10 @@ def audit_wcag(
             for v in violations
         ],
     }
-    warning = _bill(auth, price_usd=0.03)
+    warning = _bill(auth, price_usd=_price_of("/audit/wcag"))
     if warning:
         result["billing_warning"] = warning
-    _attach_issued_key(result, auth)
-    return result
+    return _deliver(result, auth)
 
 
 @app.post("/audit/seo")
@@ -2016,26 +3253,29 @@ def audit_seo(
     x_payment: Optional[str] = Header(None),
     authorization: Optional[str] = Header(None),
 ):
-    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=0.03)
+    refused = _reject_unfetchable_target(payload.url)
+    if refused is not None:
+        return refused
+    # Before any payment is read: a body with nothing to audit is refused for
+    # free. Checked after the facilitator, this 400 burned a verify round
+    # trip and the signature's nonce, so the payer's corrected retry with the
+    # same authorization was refused as a replay.
+    missing = _reject_missing_input(payload)
+    if missing is not None:
+        return missing
+    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=_price_of("/audit/seo"))
     if err:
         return err
-
-    if not payload.html and not payload.url:
-        raise HTTPException(status_code=400, detail="Provide 'html' or 'url'")
 
     try:
         result = audits.run_seo_audit(payload.html, payload.url)
     except Exception as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"status": "error", "pass": None, "detail": f"Audit could not complete: {exc}"},
-        )
+        return _failed_audit_response(auth, f"Audit could not complete: {exc}")
 
-    warning = _bill(auth, price_usd=0.03)
+    warning = _bill(auth, price_usd=_price_of("/audit/seo"))
     if warning:
         result["billing_warning"] = warning
-    _attach_issued_key(result, auth)
-    return result
+    return _deliver(result, auth)
 
 
 @app.post("/audit/security")
@@ -2046,23 +3286,22 @@ def audit_security(
     x_payment: Optional[str] = Header(None),
     authorization: Optional[str] = Header(None),
 ):
-    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=0.03)
+    refused = _reject_unfetchable_target(payload.url)
+    if refused is not None:
+        return refused
+    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=_price_of("/audit/security"))
     if err:
         return err
 
     try:
         result = audits.run_security_audit(payload.url)
     except Exception as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"status": "error", "pass": None, "detail": f"Audit could not complete: {exc}"},
-        )
+        return _failed_audit_response(auth, f"Audit could not complete: {exc}")
 
-    warning = _bill(auth, price_usd=0.03)
+    warning = _bill(auth, price_usd=_price_of("/audit/security"))
     if warning:
         result["billing_warning"] = warning
-    _attach_issued_key(result, auth)
-    return result
+    return _deliver(result, auth)
 
 
 @app.post("/audit/performance")
@@ -2073,23 +3312,22 @@ def audit_performance(
     x_payment: Optional[str] = Header(None),
     authorization: Optional[str] = Header(None),
 ):
-    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=0.03)
+    refused = _reject_unfetchable_target(payload.url)
+    if refused is not None:
+        return refused
+    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=_price_of("/audit/performance"))
     if err:
         return err
 
     try:
         result = audits.run_performance_audit(payload.url)
     except Exception as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"status": "error", "pass": None, "detail": f"Audit could not complete: {exc}"},
-        )
+        return _failed_audit_response(auth, f"Audit could not complete: {exc}")
 
-    warning = _bill(auth, price_usd=0.03)
+    warning = _bill(auth, price_usd=_price_of("/audit/performance"))
     if warning:
         result["billing_warning"] = warning
-    _attach_issued_key(result, auth)
-    return result
+    return _deliver(result, auth)
 
 
 @app.post("/audit/bundle")
@@ -2101,10 +3339,13 @@ def audit_bundle(
     authorization: Optional[str] = Header(None),
 ):
     """Runs all four audits against one URL. Priced and billed as a single
-    $0.10 unit, not four separate $0.03 charges -- if any dimension fails
+    one unit, not four separate single-audit charges -- if any dimension fails
     to run, the whole call fails (502) and nothing is billed, since a
     partial bundle isn't the product being sold here."""
-    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=0.10)
+    refused = _reject_unfetchable_target(payload.url)
+    if refused is not None:
+        return refused
+    auth, err = _authorize_and_rate_limit(x_api_key, x_payment, authorization, request, price_usd=_price_of("/audit/bundle"))
     if err:
         return err
 
@@ -2133,10 +3374,7 @@ def audit_bundle(
         seo_result = audits.run_seo_audit(None, payload.url, response=shared_response)
         security_result = audits.run_security_audit(payload.url, response=shared_response)
     except Exception as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"status": "error", "pass": None, "detail": f"Bundle audit could not complete: {exc}"},
-        )
+        return _failed_audit_response(auth, f"Bundle audit could not complete: {exc}")
 
     result = {
         "status": "ok",
@@ -2148,8 +3386,40 @@ def audit_bundle(
         "security": security_result,
         "performance": performance_result,
     }
-    warning = _bill(auth, price_usd=0.10)
+    warning = _bill(auth, price_usd=_price_of("/audit/bundle"))
     if warning:
         result["billing_warning"] = warning
-    _attach_issued_key(result, auth)
-    return result
+    return _deliver(result, auth)
+
+
+# --- worker network ---------------------------------------------------------
+#
+# Mounted LAST, after every audit route is registered, so nothing here can
+# shadow a path the audits already serve.
+#
+# The four functions handed over are this module's OWN payment gate -- the
+# same ones every audit route calls, in the same order. The worker package
+# imports no payment code of its own and cannot reach x402_payments; there is
+# one settlement implementation in this service and this is it.
+#
+# browser_pool.with_page and audits.goto_guarded are passed too, so a worker
+# that needs a rendered page reuses the warm Chromium the audits already keep
+# (and the same SSRF/redirect guard), rather than launching a second browser.
+if workers is not None:
+    try:
+        workers.configure(
+            authorize_and_rate_limit=_authorize_and_rate_limit,
+            bill=_bill,
+            deliver=_deliver,
+            failed_response=_failed_audit_response,
+            with_page=browser_pool.with_page,
+            goto_guarded=getattr(audits, "goto_guarded", None),
+            # The SAME rule the audit routes refuse targets with. Injected
+            # rather than reimplemented so a worker can never fetch something
+            # an audit would refuse -- one guard, one place to fix it.
+            blocked_target_reason=audits.blocked_target_reason,
+        )
+        app.include_router(workers.router.router)
+    except Exception as _workers_mount_error:  # pragma: no cover - defensive
+        logging.getLogger("hubvibe").warning(
+            "worker network not mounted, audits unaffected: %s", _workers_mount_error)

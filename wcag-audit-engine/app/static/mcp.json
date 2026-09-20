@@ -2,16 +2,16 @@
   "mcpVersion": "2025-06-18",
   "name": "hubvibe-site-audit",
   "description": "Rule-based, verifiable site compliance audits -- accessibility (axe-core), SEO, security headers, and performance. Every result is a deterministic check against the actual page, never an LLM guess, and a check that couldn't run is never reported as a false pass.",
-  "version": "1.1.2",
-  "websiteUrl": "https://hubvibe-831480473793.us-south1.run.app/",
-  "documentationUrl": "https://hubvibe-831480473793.us-south1.run.app/.well-known/agent.json",
+  "version": "1.4.0",
+  "websiteUrl": "https://hubvibe-io.com/",
+  "documentationUrl": "https://hubvibe-io.com/.well-known/agent.json",
   "repository": {
     "url": "https://github.com/Its-fortunatefolly/HubVibe",
     "source": "github"
   },
   "icons": [
     {
-      "src": "https://hubvibe-831480473793.us-south1.run.app/favicon.svg",
+      "src": "https://hubvibe-io.com/favicon.svg",
       "mimeType": "image/svg+xml",
       "sizes": [
         "any"
@@ -21,7 +21,7 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://hubvibe-831480473793.us-south1.run.app/mcp"
+      "url": "https://hubvibe-io.com/mcp"
     }
   ],
   "note": "There IS a live MCP server here: POST to the `remotes[0].url` above (Streamable HTTP, JSON-RPC 2.0; initialize / ping / tools/list / tools/call). `initialize` and `tools/list` are free and unauthenticated, so a client can read this whole catalog and its prices before deciding to spend anything; `tools/call` is billed per call and answers an unpaid call with the payment challenge rather than an error. Each tool's `httpEndpoint` (a non-standard extension field) additionally maps that same tool onto a plain REST route, for callers that would rather POST JSON than speak MCP -- it is an alternative transport to the same audit, not a sign that MCP is unavailable. Both transports are served by one process against one catalog, so their prices and schemas cannot disagree.",
@@ -91,11 +91,17 @@
                   "description": "axe-core rule id."
                 },
                 "impact": {
-                  "type": "string",
+                  "type": [
+                    "string",
+                    "null"
+                  ],
                   "description": "axe-core impact level."
                 },
                 "help": {
-                  "type": "string"
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "help_url": {
                   "type": "string",
@@ -126,7 +132,7 @@
       "httpEndpoint": {
         "method": "POST",
         "path": "/audit/wcag",
-        "price_usd": 0.03
+        "price_usd": 0.05
       }
     },
     {
@@ -216,7 +222,7 @@
       "httpEndpoint": {
         "method": "POST",
         "path": "/audit/seo",
-        "price_usd": 0.03
+        "price_usd": 0.05
       }
     },
     {
@@ -293,7 +299,7 @@
       "httpEndpoint": {
         "method": "POST",
         "path": "/audit/security",
-        "price_usd": 0.03
+        "price_usd": 0.05
       }
     },
     {
@@ -387,7 +393,7 @@
       "httpEndpoint": {
         "method": "POST",
         "path": "/audit/performance",
-        "price_usd": 0.03
+        "price_usd": 0.05
       }
     },
     {
@@ -452,11 +458,17 @@
                       "description": "axe-core rule id."
                     },
                     "impact": {
-                      "type": "string",
+                      "type": [
+                        "string",
+                        "null"
+                      ],
                       "description": "axe-core impact level."
                     },
                     "help": {
-                      "type": "string"
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     },
                     "help_url": {
                       "type": "string",
@@ -635,7 +647,7 @@
       "httpEndpoint": {
         "method": "POST",
         "path": "/audit/bundle",
-        "price_usd": 0.1
+        "price_usd": 0.15
       }
     }
   ]

@@ -1,27 +1,27 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://hubvibe-831480473793.us-south1.run.app/</loc>
+    <loc>https://hubvibe-io.com/</loc>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://hubvibe-831480473793.us-south1.run.app/llms.txt</loc>
+    <loc>https://hubvibe-io.com/llms.txt</loc>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://hubvibe-831480473793.us-south1.run.app/.well-known/agent.json</loc>
+    <loc>https://hubvibe-io.com/.well-known/agent.json</loc>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://hubvibe-831480473793.us-south1.run.app/mcp.json</loc>
+    <loc>https://hubvibe-io.com/mcp.json</loc>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://hubvibe-831480473793.us-south1.run.app/openapi.json</loc>
+    <loc>https://hubvibe-io.com/openapi.json</loc>
     <changefreq>weekly</changefreq>
     <priority>0.6</priority>
   </url>

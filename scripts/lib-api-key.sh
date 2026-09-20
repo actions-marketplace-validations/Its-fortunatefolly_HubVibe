@@ -55,8 +55,12 @@ hv_resolve_api_key() {
 
   local service="${SERVICE:-hubvibe}"
   local region="${REGION:-us-south1}"
-  local project_args=()
-  [ -n "${PROJECT:-}" ] && project_args=(--project="$PROJECT")
+  # Always passed, never inherited: a fresh Cloud Shell has no default
+  # project, and gcloud answers that with an empty result rather than an
+  # error -- which this function would then report as "could not read
+  # service hubvibe", about a service that is running.
+  local project="${PROJECT:-resolver-time}"
+  local project_args=(--project="$project")
 
   if ! command -v gcloud >/dev/null 2>&1; then
     HV_KEY_PROBLEM="gcloud is not on PATH, so the key cannot be resolved automatically"

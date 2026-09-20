@@ -18,6 +18,14 @@ set -uo pipefail
 
 SERVICE="${SERVICE:-hubvibe}"
 REGION="${REGION:-us-south1}"
+# Passed to EVERY gcloud call below, never inherited from gcloud config.
+# A fresh Cloud Shell has no default project, and gcloud treats that as an
+# empty answer rather than an error: `secrets describe` fails, `secrets list`
+# prints nothing, and this script then said "no secret named
+# SECRET_STRIPE_KEY" over a secret that exists -- and refused to deploy. That
+# happened on the second Cloud Shell session of the night, after the first
+# one (which had the project set) disconnected.
+PROJECT="${PROJECT:-resolver-time}"
 SOURCE_DIR="${SOURCE_DIR:-wcag-audit-engine}"
 
 # The Secret Manager secret holding the Stripe secret key. A revision was once
@@ -40,11 +48,48 @@ die()   { printf '  \033[31mSTOP\033[0m  %s\n' "$1"; exit 1; }
 command -v gcloud >/dev/null 2>&1 || die "gcloud is not on PATH. Run this in Cloud Shell."
 
 step "Checking the Stripe secret exists before pointing anything at it"
-if gcloud secrets describe "$STRIPE_SECRET_NAME" >/dev/null 2>&1; then
+if gcloud secrets describe "$STRIPE_SECRET_NAME" --project="$PROJECT" >/dev/null 2>&1; then
   ok "secret $STRIPE_SECRET_NAME exists"
 else
+  # Keep gcloud's stderr. This branch used to discard it and then GUESS the
+  # cause ("gcloud config set project"), and on 2026-09-04 the guess was
+  # wrong: the prompt already read (resolver-time), --project was passed, and
+  # the real reason -- whatever gcloud printed -- was thrown away. The
+  # instruction it printed instead could not have fixed anything.
+  LIST_ERR=$(mktemp)
+  AVAILABLE=$(gcloud secrets list --project="$PROJECT" --format='value(name)' 2>"$LIST_ERR")
+  GCLOUD_SAID=$(tr -s '[:space:]' ' ' <"$LIST_ERR" | cut -c1-600)
+  rm -f "$LIST_ERR"
+  if [ -z "$AVAILABLE" ]; then
+    # Zero secrets is not a project with no secrets -- this one has several.
+    # It is gcloud not seeing the project at all, and gcloud's own message
+    # says why: a permission it lacks, an API not enabled, an expired login.
+    printf '\n  gcloud said: %s\n\n' "${GCLOUD_SAID:-(nothing -- an empty list with no error)}"
+    case "$GCLOUD_SAID" in
+      # First, because Google words it as a permission error ("does not have
+      # permission to access projects instance") and the IAM hint below would
+      # match it and send the owner to the wrong console. This is what stopped
+      # the 2026-09-04 deploy: billing off on the project shuts Secret Manager,
+      # Cloud Run and the node itself -- every symptom that night, one cause.
+      *BILLING_DISABLED*|*"billing to be enabled"*|*"enable billing"*)
+        HINT="BILLING IS DISABLED on $PROJECT. Nothing on it serves -- not Secret Manager, not Cloud Run, not the node. Link a billing account here, then wait a few minutes and re-run:
+        https://console.developers.google.com/billing/enable?project=$PROJECT" ;;
+      *PERMISSION_DENIED*|*"does not have"*|*403*)
+        HINT="this account is not authorised on $PROJECT. It needs roles/secretmanager.viewer (to read) and roles/run.admin (to deploy) on the project -- grant them in IAM, or run this from the account that owns the project." ;;
+      *"not been used"*|*"is disabled"*|*"Enable it"*)
+        HINT="the Secret Manager API is off in $PROJECT. Run: gcloud services enable secretmanager.googleapis.com --project=$PROJECT" ;;
+      *[Rr]eauthentication*|*"credentials"*|*"auth login"*)
+        HINT="the gcloud login has expired. Run: gcloud auth login" ;;
+      *"not found"*|*"could not be found"*)
+        HINT="there is no project with id $PROJECT visible to this account. Check: gcloud projects list" ;;
+      *)
+        HINT="read the message above; it is the fault. Check: gcloud config list, then gcloud config set project $PROJECT" ;;
+    esac
+    die "gcloud lists NO secrets in project $PROJECT -- it is not seeing the project.
+        $HINT"
+  fi
   printf '\n  Available secrets:\n'
-  gcloud secrets list --format='value(name)' 2>/dev/null | sed 's/^/    /'
+  printf '%s\n' "$AVAILABLE" | sed 's/^/    /'
   die "no secret named $STRIPE_SECRET_NAME. Re-run as:
         STRIPE_SECRET_NAME=<one of the above> bash scripts/repair-and-deploy.sh"
 fi
@@ -57,7 +102,7 @@ step "Reading the service's current configuration"
 # revision 62 this way, and the docstring's promise that re-running "does not
 # create pointless revisions" was quietly false.
 SVC_JSON=/tmp/hv_svc.json
-gcloud run services describe "$SERVICE" --region="$REGION" \
+gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
   --format=json > "$SVC_JSON" 2>/dev/null
 [ -s "$SVC_JSON" ] || die "could not read service $SERVICE in $REGION"
 
@@ -124,6 +169,44 @@ add_removal() {
   REMOVE_VARS="${REMOVE_VARS:+$REMOVE_VARS,}$1"
 }
 
+# Recipients that are well-formed and that nobody here can claim.
+#
+# Removing them is deliberately a REPAIR and not a refusal, and the reasoning
+# is the opposite way round from the malformed case: refusing the deploy
+# leaves the running revision advertising the address, so stopping is the
+# option that keeps money pointed at a stranger for longer. Stripping the
+# variables turns the rail off on the next revision, which is exactly the
+# manual command this was written to replace.
+#
+#   0x2b3b... sat deployed here as X402_PAY_TO_ADDRESS and the owner does not
+#             recognise it. It is 0x + 40 hex, so every shape gate said yes.
+#   0x32b0... is the test-suite constant. It exists to make the rail
+#             inspectable on a local boot; nobody holds its key, and a
+#             truncated paste of it once shipped as the tempo recipient.
+UNAFFIRMED_ADDRESSES="
+0x2b3bb4feb0c8af003da4a46e8c65e25bd6f10256
+0x32b08c5e927c69877d0fcab35618c265674922bc
+"
+
+is_unaffirmed() {
+  needle=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  for candidate in $UNAFFIRMED_ADDRESSES; do
+    [ "$needle" = "$(printf '%s' "$candidate" | tr 'A-Z' 'a-z')" ] && return 0
+  done
+  return 1
+}
+
+PAY_TO_RAW=$(env_value X402_PAY_TO_ADDRESS)
+if [ -n "$PAY_TO_RAW" ] && [ "$PAY_TO_RAW" != "__FROM_SECRET__" ] \
+   && is_unaffirmed "$PAY_TO_RAW"; then
+  add_removal X402_PAY_TO_ADDRESS
+  add_removal X402_FACILITATOR_URL
+  warn "X402_PAY_TO_ADDRESS is an address NOBODY HERE HOLDS THE KEY TO."
+  warn "Removing both x402 variables -- the rail goes off rather than settling"
+  warn "to a stranger. Turn it back on with a recipient you control:"
+  warn "  X402_PAY_TO_ADDRESS=0x... bash scripts/go-live.sh"
+fi
+
 for host in $PLACEHOLDER_HOSTS; do
   if grep -q "$host" "$SVC_JSON"; then
     add_removal X402_FACILITATOR_URL
@@ -154,6 +237,11 @@ if [ -n "$TEMPO_TO_RAW" ] && [ "$TEMPO_TO_RAW" != "__FROM_SECRET__" ]; then
     add_removal MPP_TEMPO_RECIPIENT_ADDRESS
     warn "MPP_TEMPO_RECIPIENT_ADDRESS is the zero address -- removing it. The"
     warn "tempo rail stays off until a real recipient is set."
+  elif is_unaffirmed "$TEMPO_TO_RAW"; then
+    add_removal MPP_TEMPO_RECIPIENT_ADDRESS
+    warn "MPP_TEMPO_RECIPIENT_ADDRESS is an address nobody here holds the key"
+    warn "to -- removing it. Mint a real Stripe crypto deposit address with"
+    warn "  bash scripts/go-live.sh"
   elif ! printf '%s' "$TEMPO_TO_RAW" | grep -qiE '^0x[0-9a-f]{40}$'; then
     add_removal MPP_TEMPO_RECIPIENT_ADDRESS
     warn "MPP_TEMPO_RECIPIENT_ADDRESS is not a valid EVM address (needs 0x +"
@@ -168,11 +256,11 @@ fi
 
 if [ ${#UPDATE_ARGS[@]} -gt 0 ]; then
   step "Applying the configuration repair"
-  gcloud run services update "$SERVICE" --region="$REGION" "${UPDATE_ARGS[@]}" \
+  gcloud run services update "$SERVICE" --project="$PROJECT" --region="$REGION" "${UPDATE_ARGS[@]}" \
     || die "config repair failed -- nothing was deployed, the running revision is untouched"
   ok "configuration repaired"
   # The service just changed; the cached JSON is stale for preflight.
-  gcloud run services describe "$SERVICE" --region="$REGION" \
+  gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
     --format=json > "$SVC_JSON" 2>/dev/null
 else
   step "Configuration is already correct -- nothing to repair"
@@ -207,13 +295,13 @@ step "Preflight: checking the live environment"
 PREFLIGHT_FAILED=0
 
 # 1. Firestore. billing.lookup_key hits it on every keyed request.
-if gcloud firestore databases describe --database='(default)' \
+if gcloud firestore databases describe --database='(default)' --project="$PROJECT" \
      --format='value(name)' >/dev/null 2>&1; then
   ok "Firestore (default) database exists"
 else
   warn "no Firestore (default) database. Every API-key call will fail to"
   warn "authenticate, and checkout cannot store issued keys. Create it with:"
-  warn "  gcloud firestore databases create --location=$REGION"
+  warn "  gcloud firestore databases create --location=$REGION --project=$PROJECT"
   PREFLIGHT_FAILED=1
 fi
 
@@ -332,12 +420,64 @@ fi
 
 # 4. Idle billing. Not fatal, but it is pure loss at low volume and nothing
 #    else reports it.
-MIN_SCALE=$(gcloud run services describe "$SERVICE" --region="$REGION" \
+MIN_SCALE=$(gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
   --format='value(spec.template.metadata.annotations["autoscaling.knative.dev/minScale"])' 2>/dev/null)
 if [ -n "$MIN_SCALE" ] && [ "$MIN_SCALE" -gt 0 ] 2>/dev/null; then
-  warn "min-instances=$MIN_SCALE: you are paying to keep an instance warm"
-  warn "24/7. On a browser-sized container that is real money against zero"
-  warn "traffic. Set to 0 with: gcloud run services update $SERVICE --region=$REGION --min-instances=0"
+  # This used to only WARN, printing the gcloud command for a human to run.
+  # It warned on every deploy for weeks while the meter ran, and the bill
+  # reached $300 before anyone acted on it. A warning nobody reads is not a
+  # control; the money leaves either way.
+  #
+  # So it is repaired, like the malformed tempo recipient above, and for the
+  # same reason: keeping an instance warm has no valid use at zero paid
+  # traffic. Cold starts cost an agent a few seconds on the first call after
+  # an idle period. Idle billing costs real dollars every hour forever.
+  # KEEP_WARM=1 opts back in once paid volume makes the trade worth it.
+  if [ -n "${KEEP_WARM:-}" ]; then
+    warn "min-instances=$MIN_SCALE and KEEP_WARM is set -- leaving it warm."
+    warn "That is real money per hour against current traffic. Unset KEEP_WARM"
+    warn "to have this set it back to 0."
+  else
+    warn "min-instances=$MIN_SCALE: paying to keep an instance warm 24/7."
+    warn "Setting it to 0 -- at zero paid traffic that is pure loss."
+    if gcloud run services update "$SERVICE" --project="$PROJECT" \
+         --region="$REGION" --min-instances=0 >/dev/null 2>&1; then
+      ok "min-instances set to 0; idle billing stops"
+    else
+      warn "could not set it. Run this yourself, it is the whole bill:"
+      warn "  gcloud run services update $SERVICE --project=$PROJECT --region=$REGION --min-instances=0"
+    fi
+  fi
+fi
+
+# 5. Spend guard. The bill reached $300 with zero revenue before anyone saw
+#    it, because nothing was watching. A budget alert is Google's own
+#    tripwire: an email to the billing admins at half and at all of the
+#    amount. It costs nothing, and it is created here so it cannot be
+#    forgotten the way the min-instances warning was. Not fatal: a deploy
+#    must not be blocked by an alert failing to register -- but it is never
+#    silent about it either.
+step "Spend guard: a \$${SPEND_ALERT_USD:-5}/month billing alert on $PROJECT"
+BILLING_ACCOUNT=$(gcloud billing projects describe "$PROJECT" \
+  --format='value(billingAccountName)' 2>/dev/null | sed 's|billingAccounts/||')
+if [ -z "$BILLING_ACCOUNT" ]; then
+  warn "no billing account is linked to $PROJECT -- nothing on it can serve, and there"
+  warn "is nothing to alert on. Link one: https://console.developers.google.com/billing/enable?project=$PROJECT"
+elif gcloud billing budgets list --billing-account="$BILLING_ACCOUNT" \
+       --format='value(displayName)' 2>/dev/null | grep -qx "hubvibe-spend-alert"; then
+  ok "budget alert 'hubvibe-spend-alert' already exists on billing account $BILLING_ACCOUNT"
+else
+  gcloud services enable billingbudgets.googleapis.com --project="$PROJECT" >/dev/null 2>&1 || true
+  if gcloud billing budgets create --billing-account="$BILLING_ACCOUNT" \
+       --display-name="hubvibe-spend-alert" \
+       --budget-amount="${SPEND_ALERT_USD:-5}USD" \
+       --filter-projects="projects/$PROJECT" \
+       --threshold-rule=percent=0.5 --threshold-rule=percent=1.0 >/dev/null 2>&1; then
+    ok "budget alert created: email at 50% and 100% of \$${SPEND_ALERT_USD:-5}/month"
+  else
+    warn "could not create the budget alert. Do it once by hand:"
+    warn "  gcloud billing budgets create --billing-account=$BILLING_ACCOUNT --display-name=hubvibe-spend-alert --budget-amount=${SPEND_ALERT_USD:-5}USD --filter-projects=projects/$PROJECT --threshold-rule=percent=1.0"
+  fi
 fi
 
 if [ "$PREFLIGHT_FAILED" -ne 0 ]; then
@@ -348,9 +488,45 @@ fi
 ok "preflight passed"
 
 step "Deploying the current source"
-gcloud run deploy "$SERVICE" --source="$SOURCE_DIR" --region="$REGION" \
+# Capacity is pinned here rather than inherited from whatever the last
+# revision happened to have. Each setting is a bill-or-outage decision:
+#   --memory/--cpu      four Chromium contexts plus Python need ~2 GiB; the
+#                       512 MiB default OOMs under concurrent audits. Billed
+#                       only while a request is in flight (min-instances 0).
+#   --concurrency       MAX_CONCURRENT_AUDITS (4) audits run per instance;
+#                       at 8 in-flight requests Cloud Run adds an instance
+#                       instead of queueing 80 behind one browser.
+#   --max-instances     the blast radius of a flood of unpaid 402s, and the
+#                       hard ceiling on what a day can cost: 3 instances at
+#                       full tilt is ~$12/day worst case, while 3 x 4 audits
+#                       is ~2 audits/s ~ 170k audits/day ~ $5k/day of PAID
+#                       capacity. Raise it when revenue says so, not before.
+#   --timeout           a bundle is four page loads; 120s covers it and
+#                       stops a hung audit from holding an instance for 5 min.
+#   --cpu-boost         full CPU during cold start, so a paying agent's
+#                       first call after idle is not the one that times out.
+# The identity every 402 and manifest advertises. The code's default is the
+# domain (https://hubvibe-io.com) -- right on the VPS, where Caddy serves it,
+# and WRONG here until that domain points at Cloud Run: deployed without
+# this, every resource URL and the Bazaar record would name a parked page.
+# So on Cloud Run the identity is this service's own URL, unless the operator
+# says otherwise (PUBLIC_BASE_URL=https://hubvibe-io.com once the domain is
+# mapped to this service). Fail closed if neither is known.
+PUBLIC_URL="${PUBLIC_BASE_URL:-$(python3 -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("status", {}).get("url", ""))
+except Exception:
+    pass
+' "$SVC_JSON")}"
+[ -n "$PUBLIC_URL" ] || die "cannot tell which URL this node should advertise; set PUBLIC_BASE_URL=https://... and re-run"
+
+gcloud run deploy "$SERVICE" --source="$SOURCE_DIR" --project="$PROJECT" --region="$REGION" \
+  --memory="${MEMORY:-2Gi}" --cpu="${CPU:-2}" --concurrency="${CONCURRENCY:-8}" \
+  --max-instances="${MAX_INSTANCES:-3}" --timeout="${REQUEST_TIMEOUT:-120}" --cpu-boost \
+  --update-env-vars="PUBLIC_BASE_URL=$PUBLIC_URL" \
   || die "deploy failed. The previous revision keeps serving; fix the error above and re-run."
-ok "deployed"
+ok "deployed -- advertising $PUBLIC_URL as this node's identity"
 
 # SKIP_VERIFY exists so a deploy and its verification can be run separately --
 # verify-live.sh makes real network calls with retries, which is right after a

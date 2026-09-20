@@ -7,7 +7,7 @@ a newly added CI step fail with "HTTP 402 -- go buy a plan", and a step that
 fails on its first execution is deleted on the next push. The adoption funnel
 was closed before it opened, however good the discovery surfaces were.
 
-With a funded wallet the pipeline pays $0.03 a run by itself: no account, no
+With a funded wallet the pipeline pays $0.05 a run by itself: no account, no
 checkout, no human. That is the machine-payable thesis applied to the channel
 with the most volume in it.
 
@@ -108,12 +108,34 @@ def main() -> None:
         file=sys.stderr,
     )
 
+    # x402HTTPClientSync does not speak HTTP itself -- it has no .post(). It
+    # encodes and decodes the protocol around a request WE make: send the call
+    # unpaid, hand it the 402 to turn into payment headers, then send the same
+    # call again carrying them. Driving it any other way raises AttributeError
+    # before a single byte reaches the node.
+    url = "%s/audit/%s" % (base, endpoint)
+    body = {"url": target_url}
+
     try:
-        response = http.post(
-            "%s/audit/%s" % (base, endpoint),
-            json={"url": target_url},
-            timeout=timeout,
-        )
+        import httpx
+
+        with httpx.Client(timeout=timeout, follow_redirects=False) as session:
+            response = session.post(url, json=body)
+
+            if response.status_code == 402:
+                payment_headers, payment_payload = http.handle_402_response(
+                    dict(response.headers), response.content, url
+                )
+                response = session.post(url, json=body, headers=payment_headers)
+                if payment_payload is not None:
+                    # Reads the settle receipt off the 200 and lets the client
+                    # record it; a failed settle is reported by the node in the
+                    # body, which the caller writes out below either way.
+                    http.process_payment_result(
+                        payment_payload,
+                        lambda name: response.headers.get(name),
+                        response.status_code,
+                    )
     except Exception as exc:
         # The x402 client raises with the whole 402 body attached -- schema and
         # all -- and a screenful of JSON buries the one line that says why.

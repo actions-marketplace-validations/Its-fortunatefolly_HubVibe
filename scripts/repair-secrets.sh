@@ -224,7 +224,7 @@ for secret in $SECRETS; do
   else
     echo "    no enabled version holds a usable value. This cannot be repaired"
     echo "    from inside the project -- the value has to come from its source"
-    echo "    (the Stripe dashboard, the CDP portal, and so on)."
+    echo "    (the Stripe dashboard, the facilitator's portal, and so on)."
   fi
 done
 

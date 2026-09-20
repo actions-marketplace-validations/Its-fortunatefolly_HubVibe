@@ -46,12 +46,12 @@ run, never billed):
 
 | Route | Input | Price | Checks |
 |---|---|---|---|
-| `POST /audit` | `html` or `url` | $0.03 | Alias of `/audit/wcag`, kept for compatibility |
-| `POST /audit/wcag` | `html` or `url` | $0.03 | WCAG 2.1 A/AA via axe-core |
-| `POST /audit/seo` | `html` or `url` | $0.03 | Title, meta description, H1s, canonical, OpenGraph, structured data, lang |
-| `POST /audit/security` | `url` (required) | $0.03 | HTTPS, HSTS, CSP, X-Content-Type-Options, frame protection, Referrer-Policy, CORS |
-| `POST /audit/performance` | `url` (required) | $0.03 | DOM node count, transferred bytes, request count from one real page load |
-| `POST /audit/bundle` | `url` (required) | $0.10 | All four above, atomically -- if any fails, the whole call fails and nothing is billed |
+| `POST /audit` | `html` or `url` | $0.05 | Alias of `/audit/wcag`, kept for compatibility |
+| `POST /audit/wcag` | `html` or `url` | $0.05 | WCAG 2.1 A/AA via axe-core |
+| `POST /audit/seo` | `html` or `url` | $0.05 | Title, meta description, H1s, canonical, OpenGraph, structured data, lang |
+| `POST /audit/security` | `url` (required) | $0.05 | HTTPS, HSTS, CSP, X-Content-Type-Options, frame protection, Referrer-Policy, CORS |
+| `POST /audit/performance` | `url` (required) | $0.05 | DOM node count, transferred bytes, request count from one real page load |
+| `POST /audit/bundle` | `url` (required) | $0.15 | All four above, atomically -- if any fails, the whole call fails and nothing is billed |
 
 `security`/`performance`/`bundle` need a live, fetchable URL (they inspect a
 real HTTP response / real browser load) -- raw HTML alone isn't enough for
@@ -72,7 +72,7 @@ If none of those is present or valid, the response is HTTP 402 with both:
   "x402Version": 1,
   "scheme": "exact",
   "network": "eip155:8453",
-  "price": "$0.03",
+  "price": "$0.05",
   "payTo": "0x...",
   "accepted_payment_header": "X-PAYMENT",
   "alternative": "X-API-Key header (Stripe-based billing) is also accepted"
@@ -96,108 +96,52 @@ On audit failure (browser crash, invalid input, timeout): HTTP 502,
 `{"status": "error", "pass": null, "detail": "..."}`. Failed audits are
 never billed.
 
-## Growth surface
+## The landing page is not a product surface
 
-`/` serves a landing page (`app/static/index.html`), not the health check
-(that lives at `/health`; Cloud Run's frontend reserves `/healthz`).
-
-The page exists for humans evaluating the service — buyers, partners, and
-anyone verifying the business is real — but the product itself is the
-machine API, and the page is written that way: it leads with per-call
-pricing and the 402 payment handshake, not with a subscription pitch.
+`/` serves an about-page (`app/static/index.html`), not the health check
+(that lives at `/health`; Cloud Run's frontend reserves `/healthz`). It
+says what HubVibe is and points at the machine surfaces; it sells nothing,
+carries no form, and never prints the per-call rate. HubVibe is software
+to software: the buyer is an agent or a pipeline, the product is the HTTP
+402 path and the discovery surfaces that lead machines to it.
 
 There is deliberately **no free scan**. An audit costs a real browser page
 load, so giving them away funds strangers' compute at our expense and
-invites abuse. The only human path is `/billing/checkout`, which issues an
-API key; machines pay per call over x402/MPP.
+invites abuse.
 
 ## Getting paid
 
-Two audiences, priced in different units on purpose:
+Per call is the only price ($0.05 per audit, $0.15 for the bundle), paid
+by the calling software on the request itself. No account, no signup, no
+subscription, no human step:
 
-- **Machines, per call** ($0.03 individual, $0.10 bundle): x402 or MPP, no
-  subscription, no signup — see the two sections below. This is the product.
-- **Humans, per site watched** — three Stripe-backed plans:
+- **x402** (`X-PAYMENT`): USDC on Base, settled by the facilitator into
+  the self-custody pay-to wallet. The primary rail; see below.
+- **MPP** (`Authorization: Payment ...`): a machine credential verified
+  against Stripe or the Tempo network, where those are configured. The
+  MPP top-up variant sells a small prepaid block to the calling machine on
+  that same request and returns an `api_key` holding the remainder, which
+  the machine spends per call as `X-API-Key`. Nothing is bought on a page.
 
-  | Plan | Price | Covers | Monthly call cap |
-  |---|---|---|---|
-  | Single report | $29.99 once | one site, all four checks, one report page | n/a (one purchase) |
-  | Pro | $79/month | 5 sites, audited daily, with history | 2,000 |
-  | Agency | $249/month | 50 sites, audited daily, client-ready reports | 10,000 |
+Every call that Stripe bills still reports a Stripe Meter Event
+(`billing.record_usage`), priced in meter units: a $0.05 audit is 5 units
+of a $0.01 Price, a $0.15 bundle is 15, so `STRIPE_METERED_PRICE_ID`,
+`STRIPE_METER_UNIT_CENTS` (default `1`) and `STRIPE_METER_AGGREGATION`
+(`count` or `sum`, default `count`) must describe the same Price or every
+invoice is wrong uniformly and invisibly. The key store (Firestore on
+Cloud Run, SQLite on the box) holds the `api_key -> record` mapping and
+prepaid balances.
 
-  Pricing per *site* rather than per *scan* is deliberate: denominating in
-  scans invited the obvious arithmetic against the $0.03 machine rate and
-  made the plan strictly worse than paying per call.
+Legacy, kept only so keys issued before 2026-09-06 keep working: the
+human plan tiers are retired, `/billing/checkout` refuses a plan,
+`STRIPE_PRICE_PRO` / `STRIPE_PRICE_AGENCY` / `STRIPE_PRICE_ONEOFF_REPORT`
+are ignored, and `QUOTA_PRO`, `QUOTA_AGENCY` and `SAAS_MONTHLY_QUOTA`
+only govern those old keys. The Stripe webhook at `/billing/webhook`
+(`checkout.session.completed`) exists for the same reason. Do not build
+on any of it.
 
-  The caps are sized to each plan's own promise with headroom (Agency at 50
-  sites × 4 checks × 31 days is 6,200 calls), because the cap exists to stop
-  runaway abuse, not to meter value — marginal cost is ~$0.00007 per audit.
-  The plan is recorded on the API key at checkout, so
-  `billing.check_and_increment_quota` enforces the cap the customer actually
-  bought; a legacy key with no plan recorded falls back to
-  `SAAS_MONTHLY_QUOTA`. Past the cap the bare `X-API-Key` stops being
-  sufficient and the call falls through to x402/MPP — not a special code
-  path, just the existing three-way auth check.
-
-Every real call also still reports a Stripe Meter Event
-(`billing.record_usage`) regardless of which auth path was used to bill it
-via Stripe, so usage history stays centralized in Stripe either way. Stripe
-owns the balance and the invoicing — this service only stores a thin
-`api_key -> Stripe customer_id` mapping in Firestore, so there's no custom
-balance-tracking code that can drift from what Stripe actually charges.
-(The $0.10 bundle price is approximated as 3 Meter Events, ~$0.09, against
-the existing flat per-event meter rather than requiring a second Stripe
-Price/meter just for this -- see `record_usage`'s docstring.)
-
-Customer-facing flow (all handled by this service, no external pages
-required to make it work):
-
-1. `POST /billing/checkout {"email": "..."}` -> `{"checkout_url": "..."}`;
-   the landing page redirects the customer there.
-2. Stripe redirects back to `/billing/success?session_id=...` (or your own
-   `CHECKOUT_SUCCESS_URL`, if you set one to override the default). That
-   page polls `GET /billing/api-key` until the webhook lands and displays
-   the customer's key with a ready-to-run `curl` example.
-3. The customer uses that key as `X-API-Key` on any `/audit*` route. Every
-   successful audit reports usage to Stripe; Stripe bills them on its
-   normal cycle.
-
-One-time setup in the Stripe Dashboard (not something this code can do for
-you — it needs your Stripe account):
-
-1. **Product catalog**: create the three human plans as Prices, *not*
-   `usage_type: metered` — a recurring $79/month (-> `STRIPE_PRICE_PRO`), a
-   recurring $249/month (-> `STRIPE_PRICE_AGENCY`), and a one-time $29.99
-   (-> `STRIPE_PRICE_ONEOFF_REPORT`). A tier with no Price ID set is not
-   offered: it is omitted from `/.well-known/agent.json` and its checkout
-   refuses, rather than half-working.
-2. **Billing > Meters**: create a meter (e.g. event name `wcag_audit_call`).
-   Note its aggregation -> `STRIPE_METER_AGGREGATION` (`count` or `sum`,
-   default `count`). It cannot be changed after the meter is created.
-3. **Product catalog**: create a recurring Price with `usage_type: metered`
-   attached to that meter. Note the Price ID -> `STRIPE_METERED_PRICE_ID`,
-   **and what one unit costs** -> `STRIPE_METER_UNIT_CENTS` (default `1`,
-   i.e. $0.01/unit).
-
-   These two are not bookkeeping. Usage is reported as **the price of the
-   call in meter units** — a $0.03 audit is 3 units of a $0.01 Price, a
-   $0.10 bundle is 10 — so a Price or an aggregation that disagrees with
-   these variables invoices the wrong amount on every call, uniformly and
-   invisibly. Reconcile the Price BEFORE attaching it to a subscription;
-   an unattached metered Price charges nobody, which is exactly why a
-   mismatch here can sit unnoticed indefinitely.
-4. **Developers > Webhooks**: add an endpoint at
-   `https://<your-service>/billing/webhook` subscribed to
-   `checkout.session.completed`. Note the signing secret.
-
-Call caps: `QUOTA_PRO` (default `2000`) and `QUOTA_AGENCY` (default
-`10000`). `SAAS_MONTHLY_QUOTA` (default `1500`) is only the fallback for a
-key activated before the plan was recorded at checkout.
-
-Then provision the secrets and deploy (see below). `AUDIT_API_KEY` remains
-available as an internal/testing key that bypasses Stripe entirely — leave
-it unset once real customers exist, or keep it only for your own smoke
-tests.
+`AUDIT_API_KEY` is an internal smoke-test key that bypasses billing
+entirely; leave it unset in production.
 
 ### Getting paid without Stripe: x402
 
@@ -217,7 +161,7 @@ either way:
 - `X402_FACILITATOR_URL` — the facilitator's base URL.
 - `X402_PAY_TO_ADDRESS` — the wallet address that receives payment.
 - `X402_NETWORK` — CAIP-2 network id (default `eip155:8453`, Base mainnet).
-- `X402_PRICE` — default `$0.03`.
+- `X402_PRICE` — default `$0.05`.
 - `X402_FACILITATOR_AUTH_HEADERS` — JSON object of headers sent on every
   facilitator call, e.g. `{"Authorization": "Bearer ..."}`. Optional, but in
   practice required: the free public facilitator at `x402.org` is
@@ -229,40 +173,30 @@ either way:
 
 #### Choosing a facilitator
 
-| | |
-|---|---|
-| `https://x402.org/facilitator` | the library's default. Base Sepolia **testnet** only — fine for proving the path end to end, useless for revenue |
-| Coinbase **CDP** | mainnet, and the one that gets you into the Bazaar. First 1,000 on-chain settlements/month free, then ~$0.001 each; verification is always free |
-| others (x402.rs, xpay, …) | mainnet on Base/Solana/Polygon and more, generally bearer-token auth, which `X402_FACILITATOR_AUTH_HEADERS` covers directly |
+The default is `https://facilitator.payai.network`: keyless, Base mainnet
+(x402 v1 and v2; its `/supported` lists both `eip155:8453` and the legacy
+name `base`), and it indexes a resource in its `/discovery/resources` on
+the first settled payment, which is the only path into capability-based
+discovery. `facilitator.xpay.sh` also settles on Base mainnet but keeps no
+index; `x402.dexter.cash` indexes but its settlement signer can run dry,
+and a facilitator that cannot settle sells nothing — read the signer's gas
+before trusting one. Coinbase's facilitator
+(`https://api.cdp.coinbase.com/platform/v2/x402`) is the one behind the
+x402 Bazaar that the official SDKs' discovery reads by default; set
+`CDP_API_KEY_ID` and `CDP_API_KEY_SECRET` and the server signs CDP's
+per-request JWTs itself, and only ever sends them to a Coinbase host.
 
-At $0.03 a call, a $0.001 settlement fee is ~3% — the margin survives it
-comfortably. See "Unit economics" above.
-
-#### Turning on CDP
-
-CDP is supported directly — set two variables and nothing else:
-
-```bash
-gcloud run services update hubvibe --region=us-south1 --update-env-vars=\
-X402_FACILITATOR_URL=https://api.cdp.coinbase.com/platform/v2/x402,\
-X402_PAY_TO_ADDRESS=0xYourWallet
-gcloud run services update hubvibe --region=us-south1 \
-  --update-secrets=CDP_API_KEY_SECRET=cdp-api-key-secret:latest \
-  --update-env-vars=CDP_API_KEY_ID=your-key-id
-```
-
-`CDP_API_KEY_SECRET` is a private signing key — put it in Secret Manager, not
-in an env var.
-
-CDP does not use a fixed header. It signs a short-lived JWT per call, bound to
-that call's method, host and **full** path, so every endpoint gets its own
-token. `_CdpAuthProvider` builds all four (`/verify`, `/settle`, `/supported`,
-`/discovery/resources`), reading the paths and methods out of the x402 client
-rather than assuming them. The path prefix matters: CDP's facilitator lives
-under `/platform/v2/x402`, and a JWT signed for the bare path is a valid
-signature for the wrong request — which presents as x402 fully configured and
-every payment rejected. Tests decode the `uris` claim of each token and assert
-the exact method and full path.
+A second rail, USDC on Solana mainnet, is advertised in the v2 challenge
+when `X402_SOLANA_PAY_TO_ADDRESS` is a Solana public key you hold and the
+facilitator lists Solana with a fee payer; a payer's payload is verified
+and settled against the rail it chose.
+`scripts/probe-facilitators.sh` checks any candidate for the two things
+this server library needs: the CAIP-2 network name in `/supported`, and
+whether it serves a Bazaar index; `scripts/switch-facilitator.sh` changes
+it on a running box and rolls back if the rail vanishes. A facilitator that
+authenticates the resource server with a fixed bearer token is covered by
+`X402_FACILITATOR_AUTH_HEADERS`; one that signs a fresh credential per
+request is not supported.
 
 Turning it on, without disturbing anything else on the service:
 
@@ -294,6 +228,23 @@ service through the MCP registry — by name, never by capability.
 Building the discovery data can never break a payment challenge: if it
 throws, the 402 still goes out with its price and rails intact. Losing the
 index is survivable; losing the sale is not.
+
+#### Paying over MCP
+
+`/mcp` speaks the x402 MCP protocol (`x402.mcp` in the library), which is
+not the HTTP 402 shape. An unpaid `tools/call` answers with an `isError`
+result whose `structuredContent` (and text) is the **v2** `PaymentRequired`
+-- the same challenge the HTTP path encodes into `PAYMENT-REQUIRED`, built
+by the same function, with `resource.url` naming `/mcp` and a Bazaar record
+that names the tool and its transport. The client signs for `accepts[0]`
+and retries with the `PaymentPayload` in `params._meta["x402/payment"]`
+(the official `x402.mcp` client does this automatically); the facilitator's
+settle response comes back in the result's `_meta["x402/payment-response"]`,
+beside the `PAYMENT-RESPONSE` header. The `_meta` payload is re-encoded into
+the header form and verified by the same path as an HTTP payment, so the
+replay guard, the facilitator loop and the logging are shared rather than
+duplicated. An explicit `X-PAYMENT` / `PAYMENT-SIGNATURE` header on the POST
+still works and wins when both are present.
 
 ### Getting paid without Stripe subscriptions: MPP
 
@@ -336,7 +287,7 @@ header on a 402 for that method) and stays inert:
 - **stripe** method needs `MPP_STRIPE_NETWORK_PROFILE_ID` (your Stripe
   profile ID, `profile_...` -- Dashboard → "Stripe profile" → Get started,
   in **live** mode; no Product/Price needed, unlike the subscription flow
-  above). `MPP_STRIPE_PRICE_CENTS` (default `3`, i.e. $0.03),
+  above). `MPP_STRIPE_PRICE_CENTS` (default `5`, i.e. $0.05),
   `MPP_STRIPE_CURRENCY` (default `usd`), and `MPP_STRIPE_API_VERSION`
   (default `2026-05-27.preview`) are optional.
 
@@ -346,7 +297,7 @@ header on a 402 for that method) and stays inert:
   no `WWW-Authenticate` challenge, no `accepts` entry, not listed in
   `payment.methods` -- and a stale challenge under the floor is refused
   before an SPT is spent on it. Configured is not the same as usable: at the
-  $0.03/$0.10 machine rates this rail stays dark on purpose, because
+  $0.05/$0.15 machine rates this rail stays dark on purpose, because
   advertising it would take a caller's single-use token and then fail at the
   Stripe API every time. For sub-50c machine payments through Stripe, use
   stablecoins (below) — their minimum is 1 cent — or price a route at 50c+.
@@ -356,7 +307,7 @@ header on a 402 for that method) and stays inert:
   `https://rpc.tempo.xyz`, `MPP_TEMPO_TOKEN_ADDRESS` defaults to the actual
   mainnet USDC.e contract `0x20C000000000000000000000b9537d11c60E8b50`, and
   `MPP_TEMPO_CHAIN_ID` defaults to `4217`. `MPP_TEMPO_PRICE_BASE_UNITS`
-  defaults to `30000` ($0.03 at USDC's 6 decimals).
+  defaults to `50000` ($0.05 at USDC's 6 decimals).
 
   **This method is not actually Tempo-specific — it runs on any EVM chain.**
   Verification is `eth_getTransactionReceipt` over JSON-RPC plus standard
@@ -485,14 +436,13 @@ gcloud run deploy hubvibe \
   --cpu=2 \
   --concurrency=4 \
   --min-instances=1 \
-  --set-env-vars=STRIPE_METERED_PRICE_ID=price_...,STRIPE_METER_EVENT_NAME=wcag_audit_call,STRIPE_PRICE_ONEOFF_REPORT=price_...,STRIPE_PRICE_PRO=price_...,STRIPE_PRICE_AGENCY=price_...,X402_FACILITATOR_URL=https://...,X402_PAY_TO_ADDRESS=0x...,X402_NETWORK=eip155:8453,X402_PRICE=\$0.03,MPP_STRIPE_NETWORK_PROFILE_ID=profile_...,MPP_TEMPO_RPC_URL=https://...,MPP_TEMPO_TOKEN_ADDRESS=0x...,MPP_TEMPO_RECIPIENT_ADDRESS=0x... \
+  --set-env-vars=STRIPE_METERED_PRICE_ID=price_...,STRIPE_METER_EVENT_NAME=wcag_audit_call,X402_FACILITATOR_URL=https://...,X402_PAY_TO_ADDRESS=0x...,X402_NETWORK=eip155:8453,X402_PRICE=\$0.05,MPP_STRIPE_NETWORK_PROFILE_ID=profile_...,MPP_TEMPO_RPC_URL=https://...,MPP_TEMPO_TOKEN_ADDRESS=0x...,MPP_TEMPO_RECIPIENT_ADDRESS=0x... \
   --set-secrets=GEMINI_API_KEY=gemini-api-key:latest,AUDIT_API_KEY=audit-api-key:latest,STRIPE_SECRET_KEY=stripe-secret-key:latest,STRIPE_WEBHOOK_SECRET=stripe-webhook-secret:latest
 ```
 
 `STRIPE_PRICE_ONEOFF_REPORT`, `STRIPE_PRICE_PRO` and `STRIPE_PRICE_AGENCY`
-are the three human plans. A tier with no Price ID set is not offered — it
-is omitted from `/.well-known/agent.json` and its checkout refuses, rather
-than half-working.
+belong to the retired human plans and can be omitted; nothing offers a
+plan and `/billing/checkout` refuses one.
 
 **Redeploying code only:** leave every flag off.
 

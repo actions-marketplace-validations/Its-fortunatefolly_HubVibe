@@ -92,8 +92,8 @@ def test_help_works_without_a_key_and_spends_nothing():
 def test_the_published_prices_it_compares_against_match_the_catalog():
     """The margin verdict is only meaningful if these are the real rates."""
     text = SCRIPT.read_text()
-    assert 'PRICE_BUNDLE="0.10"' in text
-    assert 'PRICE_SINGLE="0.03"' in text
+    assert 'PRICE_BUNDLE="0.15"' in text
+    assert 'PRICE_SINGLE="0.05"' in text
 
 
 def test_rates_are_overridable_rather_than_hardcoded():

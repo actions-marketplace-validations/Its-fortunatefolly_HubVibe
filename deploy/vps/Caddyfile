@@ -1,0 +1,37 @@
+# Caddy terminates TLS (certificates from Let's Encrypt, renewed
+# automatically) and proxies to the service.
+#
+# X-Forwarded-For: for a client that is not a trusted proxy (none are
+# configured, so: every client) Caddy REPLACES any X-Forwarded-For it was
+# sent with the real remote address -- measured on Caddy 2.10, a spoofed
+# "1.2.3.4, 5.6.7.8" reaches the app as the true client IP alone. The app's
+# rate limiter reads the last entry at RATE_LIMIT_PROXY_DEPTH=1, which is
+# that address either way.
+#
+# request_body max_size: the app refuses bodies over MAX_REQUEST_BYTES
+# (4 MiB) itself; the same cap here stops an oversized upload at the edge,
+# before it is even proxied. The biggest legitimate body is a 2 MiB html
+# audit plus JSON escaping.
+{$DOMAIN} {
+	request_body {
+		max_size 4MB
+	}
+	# Access log, one JSON line per request, to the container's stdout:
+	# client address, method, path, status, duration and User-Agent. The
+	# app's own access log has method, path and status only, so without this
+	# there is no way to tell which agents arrive, which bounce on the 402,
+	# and which pay. scripts/traffic-ledger.sh reads it. Rotated by the same
+	# json-file limits as every other container here.
+	log {
+		output stdout
+		format json
+	}
+	reverse_proxy hubvibe:8080
+}
+
+# www is the address people type; the identity every manifest advertises is
+# the bare domain. Redirect, so an owner who points both records at the box
+# gets one canonical host and a certificate for each.
+www.{$DOMAIN} {
+	redir https://{$DOMAIN}{uri} permanent
+}

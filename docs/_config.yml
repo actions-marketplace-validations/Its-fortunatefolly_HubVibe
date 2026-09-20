@@ -1,0 +1,4 @@
+# GitHub Pages builds this folder with Jekyll. The site is the about-page
+# (index.html); the operator notes beside it are not a page of the product site.
+exclude:
+  - HANDOFF.md

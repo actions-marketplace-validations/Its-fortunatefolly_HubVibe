@@ -8,11 +8,21 @@
 # image. Green tests do not prove a deploy.
 #
 # Usage:  bash scripts/verify-live.sh [BASE_URL]
+#         BASE=https://... bash scripts/verify-live.sh
 # Exit:   0 if everything expected is reachable and correct, 1 otherwise.
 
 set -uo pipefail
 
-BASE="${1:-https://hubvibe-831480473793.us-south1.run.app}"
+# Positional first, then the BASE variable, then the production domain.
+#
+# Reading ONLY $1 was a trap: every other script here takes the node's URL
+# from $BASE, so `BASE=http://... bash scripts/verify-live.sh` -- the form
+# the runbook and habit both produce -- silently ignored it and checked
+# PRODUCTION instead. Against a node that was fine, that read as 34 failures
+# (2026-09-06); against a broken production it would read as someone else's
+# node passing. A verifier that checks a different thing than it was asked
+# to is worse than no verifier.
+BASE="${1:-${BASE:-https://hubvibe-io.com}}"
 FAILURES=0
 PASSES=0
 
@@ -90,6 +100,31 @@ echo "Service up"
 # it with its own 404 before the request reaches the container.
 expect_status GET /health 200 "GET /health"
 expect_status GET / 200 "GET / (landing page)"
+
+# Is the box running THIS checkout's code? The block above warns when the
+# CHECKER is stale; this is the same question pointed the other way, and it
+# is the one nothing here used to ask.
+#
+# The Base app_id is the canary: one exact string, baked into the image at
+# build time, changed only on purpose. Not hypothetical -- on 2026-09-07
+# main carried a new app_id while the live page served the old one, every
+# check here passed (an old image answers 200 on everything), and the only
+# symptom was a Base domain verification that silently never completed.
+# `git pull` on the box does not rebuild; `docker compose up -d --build`
+# does. Skipped, out loud, when there is nothing local to compare against.
+LOCAL_INDEX="${REPO_DIR:-}/wcag-audit-engine/app/static/index.html"
+if [ -n "${REPO_DIR:-}" ] && [ -f "$LOCAL_INDEX" ]; then
+  _app_id() { grep -o 'name="base:app_id" content="[^"]*"' | head -1 | sed 's/.*content="//; s/"$//'; }
+  WANT_APP_ID=$(_app_id < "$LOCAL_INDEX")
+  LIVE_APP_ID=$(curl -sS -m 30 "$BASE/" 2>/dev/null | _app_id)
+  if [ -z "$WANT_APP_ID" ]; then
+    printf '  \033[33mNOTE\033[0m  this checkout serves no base:app_id, so the deployed image cannot be compared to it.\n'
+  elif [ "$LIVE_APP_ID" = "$WANT_APP_ID" ]; then
+    pass "the deployed homepage is this checkout's ($WANT_APP_ID)"
+  else
+    fail "the node is running an OLDER IMAGE: its homepage serves base:app_id '${LIVE_APP_ID:-none}', this checkout serves '$WANT_APP_ID'. A git pull does not rebuild -- on the box: cd deploy/vps && docker compose up -d --build"
+  fi
+fi
 
 echo
 echo "Discovery surface (how agents find and price this node)"
@@ -410,9 +445,9 @@ try:
     challenge = json.loads(text)
 except Exception:
     sys.exit(1)
-sys.exit(0 if challenge.get("price_usd") == 0.10 else 1)
+sys.exit(0 if challenge.get("price_usd") == 0.15 else 1)
 ' 2>/dev/null; then
-  pass "MCP paywall parses as JSON and quotes \$0.10 for the bundle"
+  pass "MCP paywall parses as JSON and quotes \$0.15 for the bundle"
 else
   fail "MCP paywall is not machine-parseable -- an agent cannot read the price"
 fi
@@ -433,7 +468,7 @@ import json, sys
 try:
     tiers = json.load(sys.stdin)["pricing"]["human_plans"]["tiers"]
 except Exception:
-    print("  (no human_plans block -- deploy predates the pricing fix)")
+    print("  no human_plans block -- the human tiers are retired; per call is the only price")
     sys.exit(0)
 if not tiers:
     print("  no tiers offered -- either no Stripe plan Price IDs are set on")
@@ -554,6 +589,26 @@ else
   echo "  (could not parse; check $BASE/.well-known/agent.json by hand)"
 fi
 
+# ---------------------------------------------------------------------------
+# The node must not be a proxy into its own network. Every audit fetches the
+# caller's URL from inside Cloud Run; a URL naming the metadata endpoint,
+# loopback or the VPC has to be refused with a 400 before any payment is read.
+# A deployed node that answers anything else here is exploitable for free.
+# ---------------------------------------------------------------------------
+echo
+echo "Target URL gate"
+for internal in "http://169.254.169.254/computeMetadata/v1/" "http://127.0.0.1:8080/health" "http://metadata.google.internal/"; do
+  GATE_CODE=$(curl -sS -m 45 -o /dev/null -w '%{http_code}' -X POST "$BASE/audit/wcag" \
+    -H 'Content-Type: application/json' -d "{\"url\":\"$internal\"}" 2>/dev/null)
+  if [ "$GATE_CODE" = "400" ]; then
+    pass "refuses to fetch $internal -> 400"
+  else
+    fail "did NOT refuse $internal -> got $GATE_CODE, expected 400. The deployed
+        revision predates the target gate, or ALLOW_PRIVATE_TARGETS is set on
+        the service -- it must never be. Deploy current main."
+  fi
+done
+
 echo
 echo "The paid path: can a caller who CAN pay actually get an audit?"
 # Everything above this point only ever proves that an UNauthenticated call is
@@ -563,7 +618,7 @@ echo "The paid path: can a caller who CAN pay actually get an audit?"
 # created, so the API key lookup raised on every keyed request -- while this
 # script reported 28/28 passing. The revenue path was dead and nothing said so.
 #
-# This check costs real money ($0.03), which is why it is opt-in rather than
+# This check costs real money ($0.05), which is why it is opt-in rather than
 # always-on. But a skipped check must be loud: silence is exactly what let the
 # outage live.
 # Resolve a key rather than demanding one. This check used to SKIP on every

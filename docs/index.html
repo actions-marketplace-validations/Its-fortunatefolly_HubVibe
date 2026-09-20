@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HubVibe — Automated Website Audits</title>
-<meta name="description" content="HubVibe provides programmatic API services for automated website audits — WCAG accessibility, SEO, security, and performance verification for developers and automated workflows.">
+<title>HubVibe — Machine-Payable Services and Website Audits</title>
+<meta name="description" content="HubVibe provides programmatic, machine-payable API services — automated website audits (WCAG accessibility, SEO, security, performance) plus AI inference, search, extraction, blockchain and market data, media and compute for automated workflows.">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta property="og:type" content="website">
 <meta property="og:title" content="HubVibe — Automated Website Audits">
 <meta property="og:description" content="Automated website audits: WCAG 2.1 accessibility, SEO, security headers, and performance. Deterministic checks against the live page.">
 <meta property="og:url" content="https://its-fortunatefolly.github.io/HubVibe/">
-<meta property="og:image" content="https://hubvibe-831480473793.us-south1.run.app/og-image.png">
+<meta property="og:image" content="https://hubvibe-io.com/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://hubvibe-831480473793.us-south1.run.app/og-image.png">
+<meta name="twitter:image" content="https://hubvibe-io.com/og-image.png">
 <style>
   :root {
     color-scheme: dark;
@@ -41,17 +41,6 @@
     font-size: 13px; text-transform: uppercase; letter-spacing: 0.1em;
     color: var(--muted); margin: 44px 0 16px; font-weight: 600;
   }
-  .tier {
-    border: 1px solid var(--border); border-radius: 10px;
-    background: var(--panel); padding: 20px 22px; margin-bottom: 14px;
-  }
-  .tier .amount { font-size: 26px; font-weight: 700; color: var(--text); }
-  .tier .amount span { font-size: 14px; font-weight: 400; color: var(--muted); margin-left: 4px; }
-  .tier h3 {
-    margin: 0 0 4px; font-size: 12.5px; font-weight: 600; color: var(--muted);
-    text-transform: uppercase; letter-spacing: 0.08em;
-  }
-  .tier p { margin: 8px 0 0; color: var(--muted); font-size: 14.5px; }
   table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
   th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -91,32 +80,32 @@
   </header>
 
   <p class="lead">
-    HubVibe provides programmatic API services for automated website audits —
-    WCAG 2.1 accessibility, SEO, security-header, and performance verification —
-    for developers and automated workflows. Every check is a deterministic rule
-    run against the live page, never a language model's opinion, and a check
-    that could not run is reported as an error rather than a pass.
+    HubVibe provides programmatic, machine-payable API services for developers
+    and automated workflows: automated website audits — WCAG 2.1 accessibility,
+    SEO, security-header, and performance verification — alongside a catalog of
+    per-call machine services: LLM inference, web search and extraction,
+    read-only blockchain RPC, market and prediction-market data, media
+    generation, and sandboxed compute. Audit checks are deterministic rules run
+    against the live page, and a call that could not produce a result is
+    reported as an error rather than billed.
   </p>
 
-  <h2>Plans — priced per site watched</h2>
-
-  <div class="tier">
-    <h3>Single report</h3>
-    <div class="amount">$29.99<span>once</span></div>
-    <p>One site, all four checks, delivered as a shareable report page. No account, no subscription.</p>
-  </div>
-
-  <div class="tier">
-    <h3>Pro</h3>
-    <div class="amount">$79<span>/month</span></div>
-    <p>5 sites, audited daily across all four dimensions, with history so you can see what changed.</p>
-  </div>
-
-  <div class="tier">
-    <h3>Agency</h3>
-    <div class="amount">$249<span>/month</span></div>
-    <p>50 sites, audited daily, with client-ready reports. Built for people who bill for this work.</p>
-  </div>
+  <h2>Machine services</h2>
+  <table>
+    <tr><th>Capability</th><th>What an agent gets</th></tr>
+    <tr><td>AI models</td><td>LLM inference across Claude, Gemini and OpenAI with failover</td></tr>
+    <tr><td>Search &amp; research</td><td>Web search, guarded fetch, content extraction, cited research jobs</td></tr>
+    <tr><td>Blockchain</td><td>Read-only JSON-RPC on Base: balances, blocks, transactions, logs</td></tr>
+    <tr><td>Market data</td><td>Spot prices, exchange rates, tickers; prediction-market data</td></tr>
+    <tr><td>Media</td><td>Image generation and voice synthesis, delivered in the response</td></tr>
+    <tr><td>Compute</td><td>Sandboxed code execution on deployments that enable it</td></tr>
+  </table>
+  <p class="lead" style="font-size:14.5px">
+    Which capabilities are live on a node is read from its
+    <a href="https://hubvibe-io.com/.well-known/agent.json">agent manifest</a> —
+    a capability without a configured provider is omitted, never advertised
+    broken.
+  </p>
 
   <h2>What every audit checks</h2>
   <table>
@@ -132,22 +121,22 @@
     The same checks are available as a metered HTTP API that software can call
     and pay for directly, with no account and no signup. Rates for each route
     are published in the
-    <a href="https://hubvibe-831480473793.us-south1.run.app/.well-known/agent.json">agent manifest</a>
+    <a href="https://hubvibe-io.com/.well-known/agent.json">agent manifest</a>
     and quoted in the payment challenge itself, so an integration reads the
     price from the endpoint rather than from a page.
   </p>
 
   <h2>Links</h2>
   <div class="links">
-    <a href="https://hubvibe-831480473793.us-south1.run.app/">Live service</a>
-    <a href="https://hubvibe-831480473793.us-south1.run.app/docs">API reference</a>
-    <a href="https://hubvibe-831480473793.us-south1.run.app/.well-known/agent.json">Agent manifest</a>
+    <a href="https://hubvibe-io.com/">Live service</a>
+    <a href="https://hubvibe-io.com/docs">API reference</a>
+    <a href="https://hubvibe-io.com/.well-known/agent.json">Agent manifest</a>
     <a href="https://github.com/Its-fortunatefolly/HubVibe">Source (GitHub)</a>
     <a href="https://github.com/Its-fortunatefolly/HubVibe/issues">Support</a>
   </div>
 
   <footer>
-    HubVibe · automated website auditing for developers and automated workflows.
+    HubVibe · machine-payable services for developers and automated workflows.
   </footer>
 
 </div>

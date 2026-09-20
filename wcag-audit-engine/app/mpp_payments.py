@@ -43,7 +43,7 @@ own vars are fully present):
 Stripe SPT (fiat):
 - STRIPE_SECRET_KEY               (already required by billing.py)
 - MPP_STRIPE_NETWORK_PROFILE_ID   Stripe Business Network Profile ID
-- MPP_STRIPE_PRICE_CENTS          default "3" ($0.03)
+- MPP_STRIPE_PRICE_CENTS          default "5" ($0.05)
 - MPP_STRIPE_CURRENCY             default "usd"
 - MPP_STRIPE_API_VERSION          default "2026-05-27.preview"
 
@@ -61,7 +61,7 @@ SDK, not a guess):
 - MPP_TEMPO_TOKEN_ADDRESS         default the real mainnet USDC.e contract,
                                    "0x20C000000000000000000000b9537d11c60E8b50"
 - MPP_TEMPO_CHAIN_ID              default 4217 (mainnet)
-- MPP_TEMPO_PRICE_BASE_UNITS      default "30000" ($0.03 at 6 decimals)
+- MPP_TEMPO_PRICE_BASE_UNITS      default "50000" ($0.05 at 6 decimals)
 
 Shared:
 - MPP_REALM                       default "wcag-audit-engine"
@@ -90,7 +90,7 @@ _REALM_FALLBACK = os.environ.get("MPP_REALM", "wcag-audit-engine")
 _CHALLENGE_TTL_SECONDS = int(os.environ.get("MPP_CHALLENGE_TTL_SECONDS", "300"))
 
 _STRIPE_NETWORK_PROFILE_ID = os.environ.get("MPP_STRIPE_NETWORK_PROFILE_ID")
-_STRIPE_PRICE_CENTS = os.environ.get("MPP_STRIPE_PRICE_CENTS", "3")
+_STRIPE_PRICE_CENTS = os.environ.get("MPP_STRIPE_PRICE_CENTS", "5")
 _STRIPE_CURRENCY = os.environ.get("MPP_STRIPE_CURRENCY", "usd")
 
 # Stripe's own minimum for a card payment made with a Shared Payment Token:
@@ -98,7 +98,7 @@ _STRIPE_CURRENCY = os.environ.get("MPP_STRIPE_CURRENCY", "usd")
 # card payments made with SPT" -- https://docs.stripe.com/payments/machine/mpp
 #
 # This is the whole reason this rail cannot simply be switched on. Every route
-# here is priced at $0.03 or $0.10, all of them under the floor, so a caller
+# here is priced at $0.05 or $0.15, all of them under the floor, so a caller
 # that took the mpp-stripe challenge and issued an SPT for it would have the
 # PaymentIntent rejected by Stripe on amount alone -- a rail advertised and
 # unable to settle, which is the exact failure that made the x402 rail
@@ -121,7 +121,7 @@ _TEMPO_TOKEN_ADDRESS = os.environ.get(
     "MPP_TEMPO_TOKEN_ADDRESS", "0x20C000000000000000000000b9537d11c60E8b50"
 )
 _TEMPO_RECIPIENT_ADDRESS = os.environ.get("MPP_TEMPO_RECIPIENT_ADDRESS")
-_TEMPO_PRICE_BASE_UNITS = os.environ.get("MPP_TEMPO_PRICE_BASE_UNITS", "30000")
+_TEMPO_PRICE_BASE_UNITS = os.environ.get("MPP_TEMPO_PRICE_BASE_UNITS", "50000")
 
 # keccak256("Transfer(address,address,uint256)") -- standard ERC-20/TIP-20 event topic.
 _TRANSFER_EVENT_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -150,7 +150,7 @@ def stripe_configured() -> bool:
 # Stripe rejects the charge on amount alone.
 #
 # This is the answer to a constraint that cannot be argued with: SPT has a
-# 0.50 USD floor and this service sells $0.03 calls, so the rail can only ever
+# 0.50 USD floor and this service sells $0.05 calls, so the rail can only ever
 # settle if what it sells is a BLOCK of calls rather than one call. The agent
 # pays once, above the floor, and leaves with a prepaid key worth what it paid.
 _STRIPE_TOPUP_CENTS = int(os.environ.get("MPP_STRIPE_TOPUP_CENTS", "50"))
@@ -169,7 +169,7 @@ def stripe_available_for(price_cents: int) -> bool:
     """Whether the SPT rail can actually settle a charge of this size.
 
     Configured is not the same as usable. Stripe rejects a card SPT charge
-    below its minimum outright, so offering the rail at $0.03 would hand an
+    below its minimum outright, so offering the rail at $0.05 would hand an
     agent a challenge, take its token, and fail at the API -- the caller
     cannot buy and we cannot sell. Splitting this out of stripe_configured()
     keeps "the operator set the variables" and "money can move" as separate
@@ -322,8 +322,8 @@ def www_authenticate_headers(realm: Optional[str] = None, price_usd: Optional[fl
     challenge issued on one hostname can never be replayed against another
     deployment that happens to share the same signing secret.
 
-    `price_usd` overrides the deploy-wide default (e.g. $0.10 for a bundle
-    route vs the default $0.03) -- the amount that ends up in each
+    `price_usd` overrides the deploy-wide default (e.g. $0.15 for a bundle
+    route vs the default $0.05) -- the amount that ends up in each
     method's challenge, and the amount that verification checks a
     credential against, since the challenge (and its HMAC binding) is
     itself the source of truth for what was actually charged.
@@ -620,7 +620,7 @@ def verify_and_settle_sync(authorization_header: str, realm: Optional[str] = Non
             return False
         # A top-up buys credit, not this call. Refusing it here rather than
         # letting it read as a per-call payment is the difference between
-        # "you bought $0.50 of credit" and "you paid $0.50 for a $0.03
+        # "you bought $0.50 of credit" and "you paid $0.50 for a $0.05
         # audit and got nothing back" -- see settle_topup_sync.
         if challenge.get("intent") == "topup":
             return False
@@ -640,7 +640,7 @@ def settle_topup_sync(authorization_header: str, realm: Optional[str] = None):
     Separate from verify_and_settle_sync because the two mean different
     things to the caller: that one says "this call is paid for", this one says
     "this much credit was purchased". Collapsing them would let a $0.50 top-up
-    be consumed as payment for one $0.03 audit, silently keeping the other
+    be consumed as payment for one $0.05 audit, silently keeping the other
     $0.47 -- which is theft dressed as a rounding decision.
 
     The amount is read from the HMAC-bound challenge rather than from the
@@ -667,3 +667,25 @@ def settle_topup_sync(authorization_header: str, realm: Optional[str] = None):
         return cents
     except Exception:
         return None
+
+
+def release_credential(authorization_header: str) -> None:
+    """Forget a per-call credential whose audit then failed to run.
+
+    A credential is marked used when it verifies, before the audit, so two
+    concurrent calls cannot both spend it. If the audit fails, the payer has
+    paid (a Stripe charge is confirmed at verification; a tempo transfer was
+    broadcast before the call) and received nothing. Releasing the mark lets
+    the SAME credential be presented again on the retry: Stripe replays the
+    confirmed PaymentIntent under its idempotency key rather than charging
+    twice, and the tempo receipt is simply re-read. Never raises.
+    """
+    try:
+        decoded = json.loads(_b64url_decode(authorization_header))
+        payload = decoded.get("payload") or {}
+        for field in ("spt", "hash"):
+            value = payload.get(field)
+            if isinstance(value, str):
+                _used_credentials.discard(value)
+    except Exception:
+        pass

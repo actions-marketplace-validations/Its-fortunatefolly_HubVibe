@@ -86,6 +86,91 @@ def _block(start_marker, end_marker):
     return text[start : text.index(end_marker, start)]
 
 
+def _deployed_image_block():
+    """The 'is the box running this checkout' section, on its own."""
+    return _block('LOCAL_INDEX="${REPO_DIR:-}', 'echo "Discovery surface')
+
+
+def _run_deployed_image_block(tmp_path, *, local_html, live_html):
+    """Drive that block against a fake checkout and a stubbed live page."""
+    index = tmp_path / "wcag-audit-engine" / "app" / "static" / "index.html"
+    index.parent.mkdir(parents=True)
+    index.write_text(local_html)
+
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    (stub_dir / "curl").write_text('#!/usr/bin/env bash\nprintf "%s" "$STUB_HTML"\n')
+    (stub_dir / "curl").chmod(0o755)
+
+    harness = tmp_path / "block.sh"
+    harness.write_text(
+        _HARNESS_PREAMBLE + f'REPO_DIR="{tmp_path}"\n' + _deployed_image_block()
+    )
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env['PATH']}"
+    env["STUB_HTML"] = live_html
+    return subprocess.run(
+        ["bash", str(harness)], capture_output=True, text=True, env=env, timeout=60
+    )
+
+
+def _page(app_id):
+    return f'<head><meta name="base:app_id" content="{app_id}" /></head>'
+
+
+# --- Is the deployed node running THIS checkout? ----------------------------
+#
+# Every other check here passes against a stale image: an old container
+# answers 200 on every route and serves a perfectly good 402. On 2026-09-07
+# main carried a new Base app_id for hours while the live page served the
+# old one, and the only symptom anywhere was a domain verification that
+# silently never completed.
+
+
+def test_a_node_running_this_checkout_passes(tmp_path):
+    result = _run_deployed_image_block(
+        tmp_path, local_html=_page("6a83832901463168d7e651ca"),
+        live_html=_page("6a83832901463168d7e651ca"),
+    )
+    assert "PASS|" in result.stdout, result.stdout
+    assert "FAIL|" not in result.stdout
+
+
+def test_a_node_running_an_older_image_is_caught_and_named(tmp_path):
+    """THE test. The failure must name both ids and the command that fixes
+    it -- 'git pull' on the box is the thing people do instead, and it
+    changes nothing the world can see."""
+    result = _run_deployed_image_block(
+        tmp_path, local_html=_page("6a83832901463168d7e651ca"),
+        live_html=_page("6a8383066ea1f57fed333625"),
+    )
+    assert "FAIL|" in result.stdout, result.stdout
+    assert "6a8383066ea1f57fed333625" in result.stdout, "the live value is not named"
+    assert "6a83832901463168d7e651ca" in result.stdout, "the expected value is not named"
+    assert "--build" in result.stdout, "the fix command is missing"
+
+
+def test_a_live_page_with_no_tag_at_all_is_a_failure(tmp_path):
+    result = _run_deployed_image_block(
+        tmp_path, local_html=_page("6a83832901463168d7e651ca"),
+        live_html="<head><title>old</title></head>",
+    )
+    assert "FAIL|" in result.stdout
+    assert "none" in result.stdout
+
+
+def test_a_checkout_with_no_tag_says_so_rather_than_passing_silently(tmp_path):
+    """A check that silently skips converts 'unverified' into 'verified' in
+    the reader's head -- this repo has paid for that twice."""
+    result = _run_deployed_image_block(
+        tmp_path, local_html="<head><title>no tag</title></head>",
+        live_html=_page("6a83832901463168d7e651ca"),
+    )
+    assert "PASS|" not in result.stdout
+    assert "FAIL|" not in result.stdout
+    assert "NOTE" in result.stdout
+
+
 def _challenge_block():
     """The x402 challenge section, on its own."""
     return _block('echo "402 challenge is machine-actionable"', 'echo "MCP endpoint')
@@ -454,3 +539,66 @@ def test_x402_alone_satisfies_the_machine_rail_check(tmp_path):
     )
     assert "a machine payment rail is live: x402" in result.stdout
     assert "FAIL|" not in result.stdout
+
+
+def test_the_checker_proves_the_deployed_node_refuses_internal_targets():
+    """A node that fetches 169.254.169.254 or its own loopback on request is a
+    free proxy into the deployment. The live checker must ask, for each of
+    the three canonical internal targets, and demand a 400."""
+    text = SCRIPT.read_text()
+    block = text[text.index("Target URL gate"):]
+    for internal in ("169.254.169.254", "127.0.0.1", "metadata.google.internal"):
+        assert internal in block, f"the checker never probes {internal}"
+    assert '"400"' in block
+    assert "ALLOW_PRIVATE_TARGETS" in block, "the fix for a failing gate is not named"
+
+
+def test_the_checker_verifies_the_node_it_was_ASKED_to_verify():
+    """It read only $1, while every other script here reads $BASE. So
+    `BASE=http://... bash scripts/verify-live.sh` -- the form the runbook and
+    habit both produce -- silently checked PRODUCTION instead. Against a
+    healthy local node that read as 34 failures (2026-09-06); against a
+    broken production it would have reported someone else's node passing.
+    A verifier that checks a different thing than it was asked to is worse
+    than no verifier."""
+    import subprocess
+
+    script = REPO_ROOT / "scripts" / "verify-live.sh"
+    text = script.read_text()
+    assert 'BASE="${1:-${BASE:-' in text, "BASE is not read from the environment"
+
+    def target(env=None, args=()):
+        # The header line names what it is about to check, and it is printed
+        # before the first network call -- so read that line and stop, rather
+        # than waiting for a full live verification to finish.
+        #
+        # Waiting was the bug. This asserts one thing about argument parsing,
+        # and waiting made it depend on whether a live node answers and on how
+        # long 25 probes take. On the CI runner, which reaches nothing, the
+        # retry backoff on the FIRST probe alone ran past the timeout, and the
+        # test failed for a reason it does not test (2026-09-08). Killing the
+        # process at the header makes it deterministic and near-instant
+        # everywhere.
+        proc = subprocess.Popen(
+            ["bash", str(script), *args], stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", **(env or {})},
+        )
+        seen = []
+        try:
+            for line in proc.stdout:
+                seen.append(line)
+                if "live verification:" in line:
+                    return line.split("live verification:")[1].strip()
+            raise AssertionError(f"no target line in output: {''.join(seen)[:300]}")
+        finally:
+            proc.kill()
+            proc.stdout.close()
+            proc.wait(timeout=30)
+
+    assert target(env={"BASE": "http://127.0.0.1:18080"}) == "http://127.0.0.1:18080"
+    # A positional argument still wins, so existing habits keep working.
+    assert target(env={"BASE": "http://127.0.0.1:18080"}, args=("http://127.0.0.1:19090",)) \
+        == "http://127.0.0.1:19090"
+    # And with neither, it checks production, as before.
+    assert target() == "https://hubvibe-io.com"

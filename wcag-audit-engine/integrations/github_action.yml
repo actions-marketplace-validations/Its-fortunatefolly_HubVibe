@@ -1,6 +1,10 @@
 # Drop-in CI gate. Copy this file to .github/workflows/hubvibe-audit.yml in
 # the repo you want audited, point AUDIT_URL at your deployed preview or
-# staging URL, and set the HUBVIBE_API_KEY secret. That is the whole setup.
+# staging URL, and set the HUBVIBE_WALLET_KEY secret to an EVM private key
+# holding a little USDC on Base. That is the whole setup: the step pays the
+# 402 per call itself, so there is no account to create and nothing to
+# provision first. If you already hold a prepaid API key, swap the
+# `wallet-key:` line below for `api-key: ${{ secrets.HUBVIBE_API_KEY }}`.
 #
 # This calls the published composite action rather than curl-ing the API by
 # hand, on purpose: the action already retries transient failures with
@@ -10,12 +14,16 @@
 # where a reviewer will actually see them. A hand-rolled curl step gets none
 # of that and has to be maintained against the API by whoever copied it.
 #
-# Cost: $0.10 per bundle run, $0.03 for a single dimension. A repo merging
+# Cost: $0.15 per bundle run, $0.05 for a single dimension. A repo merging
 # 100 pull requests a month running the full bundle on each spends $10/mo.
 #
-# Without HUBVIBE_API_KEY the run stops on the service's HTTP 402 and prints
+# With neither secret set the run stops on the service's HTTP 402 and prints
 # the payment challenge, which lists every rail this deployment can settle.
 # It does not silently pass.
+#
+# max-price-usd is a hard ceiling the client refuses to sign above, so a
+# misconfigured or hostile price in a 402 fails the step rather than draining
+# the wallet. Fund the address like petty cash.
 
 name: HubVibe Site Compliance Audit
 
@@ -42,7 +50,8 @@ jobs:
         uses: Its-fortunatefolly/hubvibe-audit-action@v1
         with:
           url: ${{ inputs.audit_url || env.AUDIT_URL }}
-          api-key: ${{ secrets.HUBVIBE_API_KEY }}
+          wallet-key: ${{ secrets.HUBVIBE_WALLET_KEY }}
+          max-price-usd: "0.15"
           # wcag | seo | security | performance | bundle (all four, billed once)
           endpoint: bundle
           # Your regressions gate the build...

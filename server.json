@@ -3,10 +3,10 @@
   "name": "io.github.Its-fortunatefolly/hubvibe",
   "title": "HubVibe Site Audits",
   "description": "Rule-based site audits: accessibility, SEO, security headers, performance. Metered per call.",
-  "version": "1.1.2",
+  "version": "1.4.0",
   "icons": [
     {
-      "src": "https://hubvibe-831480473793.us-south1.run.app/favicon.svg",
+      "src": "https://hubvibe-io.com/favicon.svg",
       "mimeType": "image/svg+xml",
       "sizes": [
         "any"
@@ -17,15 +17,15 @@
     "url": "https://github.com/Its-fortunatefolly/HubVibe",
     "source": "github"
   },
-  "websiteUrl": "https://hubvibe-831480473793.us-south1.run.app/",
+  "websiteUrl": "https://hubvibe-io.com/",
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://hubvibe-831480473793.us-south1.run.app/mcp",
+      "url": "https://hubvibe-io.com/mcp",
       "headers": [
         {
           "name": "X-API-Key",
-          "description": "HubVibe API key. Tool discovery is free; running an audit is billed per call. Get a key at /billing/checkout, or pay per call over HTTP 402 -- see /.well-known/agent.json for the rails this deployment can settle.",
+          "description": "HubVibe API key. Tool discovery is free; running an audit is billed per call. Pay per call over HTTP 402 -- see /.well-known/agent.json for the rails this deployment can settle.",
           "isRequired": false,
           "isSecret": true
         }

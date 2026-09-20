@@ -156,8 +156,8 @@ def test_the_listing_states_the_price(tmp_path):
         check=True, capture_output=True, text=True,
     )
     readme = (target / "README.md").read_text()
-    assert "$0.03" in readme
-    assert "$0.10" in readme
+    assert "$0.05" in readme
+    assert "$0.15" in readme
 
 
 def test_the_listing_does_not_assert_a_payment_rail(tmp_path):
@@ -421,7 +421,15 @@ def test_the_listing_ships_a_complete_workflow_not_only_a_step(tmp_path):
     )
     assert "jobs:" in readme and "runs-on:" in readme
     assert ".github/workflows/" in readme, "say where the file goes"
-    assert "secrets.HUBVIBE_API_KEY" in readme
+
+    # The listing must lead with a payment path the reader can actually
+    # complete. A key cannot be bought on an x402-only deployment, so a
+    # quickstart built on `api-key` sends every Marketplace visitor to a
+    # doorway that answers 501 -- the wallet pays the 402 itself and needs
+    # no account, which is the whole premise of a machine-payable API.
+    assert "secrets.HUBVIBE_WALLET_KEY" in readme
+    assert "USDC on Base" in readme, "say how to fund the wallet the quickstart needs"
+    assert "api-key" in readme, "the prepaid-key alternative must still be documented"
 
 
 def test_the_shipped_workflow_calls_the_action_rather_than_curl():

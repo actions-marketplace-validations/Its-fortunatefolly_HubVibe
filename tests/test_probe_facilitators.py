@@ -23,6 +23,7 @@ SCRIPT = REPO_ROOT / "scripts" / "probe-facilitators.sh"
 _SUPPORTED_BASE = '{"kinds":[{"scheme":"exact","network":"eip155:8453"}]}'
 _SUPPORTED_LEGACY = '{"kinds":[{"scheme":"exact","network":"base"}]}'
 _SUPPORTED_OTHER = '{"kinds":[{"scheme":"exact","network":"eip155:137"}]}'
+_SUPPORTED_SEPOLIA_ONLY = '{"kinds":[{"x402Version":2,"scheme":"exact","network":"eip155:84532"},{"x402Version":1,"scheme":"exact","network":"base-sepolia"}]}'
 _INDEX = '{"x402Version":2,"items":[{"resource":"https://a.example"}]}'
 _NOT_AN_INDEX = '{"message":"Not Found"}'
 
@@ -84,12 +85,29 @@ def test_settles_and_indexes_is_the_only_winning_combination(tmp_path):
     assert "X402_FACILITATOR_URL=https://probe.example" in result.stdout
 
 
-def test_the_legacy_network_name_also_counts(tmp_path):
-    """v1 clients register schemes under "base", not the CAIP-2 id. A
-    facilitator answering in that vocabulary settles Base just the same, and
-    rejecting it would discard a working option on a spelling."""
+def test_a_legacy_only_facilitator_is_reported_unusable_not_a_winner(tmp_path):
+    """This test used to assert the opposite -- that the legacy name "base"
+    counts as Base -- on the reasoning that rejecting it would discard a
+    working option on a spelling. Simulation showed it is not a working
+    option: the x402 server library builds every payment's requirements
+    under the CAIP-2 name and only does so when /supported lists that exact
+    name, so against a legacy-only facilitator the node can verify nothing.
+    A probe that calls such a facilitator a winner sends the deploy straight
+    at the thing that produced two rejected live payments."""
     result = _run(tmp_path, _SUPPORTED_LEGACY, "200", _INDEX, "200")
-    assert "KEYLESS WINNER" in result.stdout
+    assert "legacy name only" in result.stdout
+    assert "cannot use this facilitator" in result.stdout
+    assert "KEYLESS WINNER" not in result.stdout
+
+
+def test_a_testnet_only_facilitator_is_not_reported_as_a_mainnet_settler(tmp_path):
+    """"eip155:84532" (Base Sepolia) contains "eip155:8453". A substring
+    match called x402.org/facilitator -- Sepolia only -- a Base mainnet
+    settler on 2026-09-12, the exact bug the handoff's own rule names."""
+    result = _run(tmp_path, _SUPPORTED_SEPOLIA_ONLY, "200", _INDEX, "200")
+    assert "Base mainnet listed" not in result.stdout, "eip155:84532 matched as eip155:8453"
+    assert "Base mainnet not offered" in result.stdout
+    assert "KEYLESS WINNER" not in result.stdout
 
 
 def test_an_index_on_the_wrong_network_does_not_win(tmp_path):
@@ -101,10 +119,10 @@ def test_an_index_on_the_wrong_network_does_not_win(tmp_path):
 
 @pytest.mark.parametrize("code", ["401", "403"])
 def test_a_credentialed_facilitator_is_reported_not_silently_dropped(tmp_path, code):
-    """CDP answers 401. That is a policy gate, not an absence -- and the
-    protocol is permissionless, so a facilitator whose credentials come
-    without a business review is still usable. Saying so keeps the option
-    visible instead of burying it as a failure."""
+    """A credentialed facilitator answers 401. That is a policy gate, not an
+    absence -- and the protocol is permissionless, so a facilitator whose
+    credentials come without a business review is still usable. Saying so
+    keeps the option visible instead of burying it as a failure."""
     result = _run(tmp_path, "unauthorized", code, "unauthorized", code)
     assert "credentials required" in result.stdout
     assert "business review" in result.stdout

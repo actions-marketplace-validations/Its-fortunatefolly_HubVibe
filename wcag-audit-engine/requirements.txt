@@ -6,7 +6,11 @@ axe-playwright-python==0.1.8
 google-genai==1.2.0
 stripe==15.4.0
 google-cloud-firestore==2.28.1
-x402[evm,extensions]==2.18.0
-# Coinbase CDP facilitator auth (mainnet x402 + Bazaar listing).
-cdp-sdk==1.47.1
+x402[evm,extensions,svm]==2.22.0
+# The svm extra imports solana.rpc.api, which solana 0.40 removed; pin the
+# last line that still has it.
+solana==0.36.12
+# Coinbase CDP facilitator auth: per-request JWTs for api.cdp.coinbase.com
+# (mainnet x402 settlement + the x402 Bazaar listing).
+cdp-sdk==1.48.1
 httpx==0.28.1

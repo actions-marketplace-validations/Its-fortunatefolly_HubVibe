@@ -101,15 +101,3 @@ def with_page(fn: Callable[..., T], **context_kwargs) -> T:
                 _close_thread_browser()
 
     raise last_error
-
-
-def shutdown() -> None:
-    """Release this thread's browser and Playwright driver."""
-    _close_thread_browser()
-    playwright = getattr(_state, "playwright", None)
-    _state.playwright = None
-    if playwright is not None:
-        try:
-            playwright.stop()
-        except Exception:
-            pass
