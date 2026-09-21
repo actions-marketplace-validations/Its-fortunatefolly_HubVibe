@@ -3410,6 +3410,7 @@ if workers is not None:
         workers.configure(
             authorize_and_rate_limit=_authorize_and_rate_limit,
             node_version=SERVICE_VERSION,
+            mpp_payment_facts=mpp_payments.settlement_for,
             bill=_bill,
             deliver=_deliver,
             failed_response=_failed_audit_response,

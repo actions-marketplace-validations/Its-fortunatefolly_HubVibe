@@ -305,3 +305,139 @@ def test_a_topup_for_the_wrong_realm_is_refused(monkeypatch):
         __import__("json").dumps({"challenge": challenge, "payload": {"spt": "spt_1"}}).encode()
     )
     assert module.settle_topup_sync(credential, realm="evil.example.com") is None
+
+
+# --- the EVM `hash` rail: USDC on Base, payer sends the transfer itself -----
+
+_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+_BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+_PAY_TO = "0x837C40E2B4e976f43Ffb4451eE281A00fA9477dd"
+_SMART_WALLET = "0x37555e884c5eba10f6e816dbecea30965b9b38c0"
+_TX = "0x" + "ab" * 32
+
+
+def _evm_rail(monkeypatch, **extra):
+    return _load_mpp(
+        monkeypatch,
+        MPP_EVM_RECIPIENT_ADDRESS=_PAY_TO,
+        MPP_CHALLENGE_SECRET="a-long-random-secret",
+        **extra,
+    )
+
+
+def _receipt(payer, to, value, token=_BASE_USDC, status="0x1"):
+    pad = lambda a: "0x" + a[2:].lower().rjust(64, "0")
+    return {"status": status, "logs": [{"address": token, "topics": [_TRANSFER_TOPIC, pad(payer), pad(to)],
+                                        "data": "0x" + format(value, "064x")}]}
+
+
+def _evm_credential(module, base_units="20000", payload=None):
+    challenge = module._build_challenge("api.example.com", "evm", "charge", module._evm_request(base_units))
+    payload = payload if payload is not None else {"type": "hash", "hash": _TX}
+    return module._b64url_encode(json.dumps({"challenge": challenge, "payload": payload}).encode())
+
+
+def test_evm_rail_is_off_without_a_recipient(monkeypatch):
+    module = _load_mpp(monkeypatch, MPP_CHALLENGE_SECRET="s")
+    assert module.evm_configured() is False
+    assert not any('method="evm"' in h for h in module.www_authenticate_headers(realm="api.example.com", price_usd=0.02))
+    assert not any(e["method"] == "evm" for e in module.accepts_entries(price_usd=0.02))
+    assert not any(o["method"] == "evm" for o in module.discovery_offers(0.02))
+
+
+def test_evm_rail_signs_challenges_without_stripe(monkeypatch):
+    """The rail involves no Stripe: MPP_CHALLENGE_SECRET alone must sign."""
+    module = _evm_rail(monkeypatch)
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    assert module.evm_configured() is True
+    headers = module.www_authenticate_headers(realm="api.example.com", price_usd=0.02)
+    evm = [h for h in headers if 'method="evm"' in h]
+    assert len(evm) == 1 and 'intent="charge"' in evm[0]
+    challenge = module._build_challenge("api.example.com", "evm", "charge", module._evm_request("20000"))
+    assert module._verify_challenge_binding(challenge, "api.example.com") is True
+    request = json.loads(module._b64url_decode(challenge["request"]))
+    assert request == {"amount": "20000", "currency": _BASE_USDC, "recipient": _PAY_TO,
+                       "methodDetails": {"chainId": 8453, "credentialTypes": ["hash"]}}
+
+
+def test_evm_rail_advertises_base_usdc_at_the_route_price(monkeypatch):
+    module = _evm_rail(monkeypatch)
+    entry = [e for e in module.accepts_entries(price_usd=0.02) if e["method"] == "evm"][0]
+    assert entry["asset"] == _BASE_USDC and entry["chain_id"] == 8453 and entry["network"] == "eip155:8453"
+    assert entry["recipient"] == _PAY_TO and entry["amount_minor_units"] == "20000"
+    assert entry["credential_types"] == ["hash"]
+    offer = [o for o in module.discovery_offers(5.00) if o["method"] == "evm"][0]
+    assert offer == {"amount": "5000000", "currency": _BASE_USDC, "intent": "charge", "method": "evm"}
+
+
+def test_evm_rail_is_not_offered_above_its_value_ceiling(monkeypatch):
+    """The spec restricts hash credentials to low value (weaker challenge
+    binding); above MPP_EVM_MAX_BASE_UNITS the rail is simply absent."""
+    module = _evm_rail(monkeypatch, MPP_EVM_MAX_BASE_UNITS="1000000")
+    assert any(e["method"] == "evm" for e in module.accepts_entries(price_usd=1.00))
+    assert not any(e["method"] == "evm" for e in module.accepts_entries(price_usd=5.00))
+    assert not any('method="evm"' in h for h in module.www_authenticate_headers(realm="api.example.com", price_usd=5.00))
+
+
+def test_evm_hash_credential_verifies_against_the_receipt_and_records_the_facts(monkeypatch):
+    module = _evm_rail(monkeypatch)
+    calls = []
+
+    def rpc(method, params):
+        calls.append((method, params))
+        assert method == "eth_getTransactionReceipt" and params == [_TX]
+        return _receipt(_SMART_WALLET, _PAY_TO, 20000)
+
+    monkeypatch.setattr(module, "_evm_rpc", rpc)
+    credential = _evm_credential(module)
+    assert module.settlement_for(credential) is None  # nothing before verification
+    assert module.verify_and_settle_sync(credential, realm="api.example.com") is True
+    assert calls == [("eth_getTransactionReceipt", [_TX])]
+    facts = module.settlement_for(credential)
+    assert facts == {"rail": "mpp", "method": "evm", "payer": _SMART_WALLET, "pay_to": _PAY_TO.lower(),
+                     "amount_atomic": 20000, "asset": _BASE_USDC, "network": "eip155:8453", "tx_hash": _TX}
+    # One hash pays once.
+    assert module.verify_and_settle_sync(credential, realm="api.example.com") is False
+    # A job that failed hands the credential back for the retry.
+    module.release_credential(credential)
+    assert module.verify_and_settle_sync(credential, realm="api.example.com") is True
+
+
+def test_evm_rail_refuses_every_signature_based_credential_type(monkeypatch):
+    """permit2 / authorization / transaction all need a signature verified --
+    the thing this rail exists to avoid -- so they fail closed."""
+    module = _evm_rail(monkeypatch)
+    monkeypatch.setattr(module, "_evm_rpc", lambda m, p: _receipt(_SMART_WALLET, _PAY_TO, 20000))
+    for payload in ({"type": "permit2", "signature": "0xab"}, {"type": "authorization", "signature": "0xab"},
+                    {"type": "transaction", "signedTransaction": "0xab"}, {"type": "hash"}, {},
+                    {"type": "hash", "hash": "not-a-hash"}):
+        assert module.verify_and_settle_sync(_evm_credential(module, payload=payload), realm="api.example.com") is False
+
+
+def test_evm_hash_credential_rejects_a_transfer_that_does_not_pay_the_challenge(monkeypatch):
+    module = _evm_rail(monkeypatch)
+    cases = {
+        "reverted": _receipt(_SMART_WALLET, _PAY_TO, 20000, status="0x0"),
+        "wrong recipient": _receipt(_SMART_WALLET, "0x" + "11" * 20, 20000),
+        "short": _receipt(_SMART_WALLET, _PAY_TO, 19999),
+        "wrong token": _receipt(_SMART_WALLET, _PAY_TO, 20000, token="0x" + "22" * 20),
+        "no receipt": None,
+    }
+    for label, receipt in cases.items():
+        monkeypatch.setattr(module, "_evm_rpc", lambda m, p, r=receipt: r)
+        credential = _evm_credential(module)
+        assert module.verify_and_settle_sync(credential, realm="api.example.com") is False, label
+        assert module.settlement_for(credential) is None, label
+    monkeypatch.setattr(module, "_evm_rpc", lambda m, p: (_ for _ in ()).throw(RuntimeError("rpc down")))
+    assert module.verify_and_settle_sync(_evm_credential(module), realm="api.example.com") is False
+
+
+def test_evm_hash_credential_is_bound_to_this_deployments_token_and_recipient(monkeypatch):
+    """A challenge that names another token or recipient never verifies, even
+    with a matching receipt (configuration changed under a live challenge)."""
+    module = _evm_rail(monkeypatch)
+    monkeypatch.setattr(module, "_evm_rpc", lambda m, p: _receipt(_SMART_WALLET, "0x" + "33" * 20, 20000))
+    request = module._evm_request("20000"); request["recipient"] = "0x" + "33" * 20
+    challenge = module._build_challenge("api.example.com", "evm", "charge", request)
+    credential = module._b64url_encode(json.dumps({"challenge": challenge, "payload": {"type": "hash", "hash": _TX}}).encode())
+    assert module.verify_and_settle_sync(credential, realm="api.example.com") is False

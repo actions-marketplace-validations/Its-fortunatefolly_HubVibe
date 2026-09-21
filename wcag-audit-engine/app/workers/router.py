@@ -61,6 +61,11 @@ _configured = False
 # the build that ran the job. Injected because this module cannot import
 # app.main.
 _node_version: Optional[str] = None
+# For a job paid on the MPP `evm` hash rail: a callable mapping the
+# credential to the on-chain facts its verification recorded (payer, amount,
+# asset, network, tx). Injected like the gate itself; None means the ledger
+# simply has no payment facts for MPP-paid jobs.
+_mpp_payment_facts: Optional[Callable] = None
 
 MAX_CONCURRENT_WORKERS = int(os.environ.get("MAX_CONCURRENT_WORKERS", "8"))
 _semaphore: Optional[asyncio.Semaphore] = None
@@ -73,11 +78,12 @@ _executor: Optional[ThreadPoolExecutor] = None
 
 def configure(authorize_and_rate_limit, bill, deliver, failed_response,
               with_page=None, goto_guarded=None, blocked_target_reason=None,
-              node_version=None) -> None:
+              node_version=None, mpp_payment_facts=None) -> None:
     """Hand the worker network the core's payment gate and browser pool."""
     global _authorize, _bill, _deliver, _failed, _executor, _semaphore, _configured
-    global _node_version
+    global _node_version, _mpp_payment_facts
     _node_version = node_version
+    _mpp_payment_facts = mpp_payment_facts
     _authorize = authorize_and_rate_limit
     _bill = bill
     _deliver = deliver
@@ -120,6 +126,28 @@ def _error_status(reason: str) -> int:
     return 502
 
 
+def _mpp_facts(auth) -> Optional[dict]:
+    """On-chain facts of an MPP-paid call, from the injected lookup. None
+    for x402 (which carries its own pending payment) and for anything else."""
+    if _mpp_payment_facts is None or getattr(auth, "payment_method", None) != "mpp":
+        return None
+    credential = getattr(auth, "mpp_credential", None)
+    if not credential:
+        return None
+    try:
+        return _mpp_payment_facts(credential) or None
+    except Exception:
+        return None
+
+
+def _rail_of(auth) -> Optional[str]:
+    if getattr(auth, "pending_payment", None) is not None:
+        return "x402"
+    if getattr(auth, "payment_method", None) == "mpp":
+        return "mpp"
+    return None
+
+
 def _payer_of(auth) -> Optional[str]:
     """Best-effort payer address, for the repeat-customer signal in the ledger.
 
@@ -128,7 +156,8 @@ def _payer_of(auth) -> Optional[str]:
     """
     pending = getattr(auth, "pending_payment", None)
     if pending is None:
-        return None
+        facts = _mpp_facts(auth)
+        return facts.get("payer") if facts else None
     try:
         payload = getattr(pending, "payload", None)
         inner = getattr(payload, "payload", None) or {}
@@ -151,6 +180,9 @@ def _payment_facts_of(auth) -> dict:
              "amount_atomic": None, "tx_hash": None}
     pending = getattr(auth, "pending_payment", None)
     if pending is None:
+        mpp = _mpp_facts(auth)
+        if mpp:
+            facts.update({k: mpp.get(k) for k in facts})
         return facts
 
     def field(obj, *names):
@@ -309,7 +341,7 @@ def _make_handler(worker):
 
         ledger.open_call(call_id=call_id, worker=worker.name, path=worker.path,
                          price_usd=worker.price_usd, idempotency_key=idempotency_key,
-                         payer=payer, rail="x402" if payer else None,
+                         payer=payer, rail=_rail_of(auth),
                          request_hash=ledger.canonical_hash(payload),
                          node_version=_node_version)
 

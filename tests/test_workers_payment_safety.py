@@ -544,3 +544,62 @@ def test_a_failed_job_has_a_receipt_that_says_unpaid_and_undelivered(app_module,
 def test_an_unknown_receipt_is_a_404(client):
     assert client.get("/work/receipts/rcpt_doesnotexist").status_code == 404
     assert client.get("/work/receipts/../etc").status_code in (404, 400)
+
+
+# --- an MPP `hash`-paid job records the same facts as an x402 settlement ---
+
+def test_an_mpp_hash_paid_job_gets_a_paid_delivered_receipt(app_module, client, monkeypatch):
+    """The payer sent USDC on Base itself and presented the tx hash; the
+    ledger row and receipt must carry payer, tx, amount, asset, network and
+    pay_to exactly as for an x402 settlement, with rail mpp."""
+    async def works(ctx, payload):
+        return {"answer": 42}
+
+    _stub_skill(app_module, monkeypatch, "market.quote", works)
+    facts = {"rail": "mpp", "method": "evm", "payer": "0x37555e884c5eba10f6e816dbecea30965b9b38c0",
+             "pay_to": TEST_PAY_TO.lower(), "amount_atomic": 20000,
+             "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "network": "eip155:8453",
+             "tx_hash": "0x" + "cd" * 32}
+    monkeypatch.setattr(app_module.mpp_payments, "verify_and_settle_sync", lambda cred, realm=None: cred == "hash-cred")
+    monkeypatch.setattr(app_module.mpp_payments, "settlement_for", lambda cred: dict(facts) if cred == "hash-cred" else None)
+    billed = []
+    monkeypatch.setattr(app_module, "_bill", lambda auth, price_usd: billed.append(price_usd))
+    W.router.configure(
+        authorize_and_rate_limit=app_module._authorize_and_rate_limit,
+        bill=app_module._bill, deliver=app_module._deliver,
+        failed_response=app_module._failed_audit_response,
+        mpp_payment_facts=app_module.mpp_payments.settlement_for)
+
+    response = client.post("/work/market/quote", headers={"Authorization": "Payment hash-cred"},
+                           json={"product_id": "BTC-USD"})
+    assert response.status_code == 200, response.text
+    receipt = client.get(response.json()["receipt_url"]).json()
+    assert receipt["outcome"] == "paid_delivered" and receipt["paid"] is True and receipt["delivered"] is True
+    assert receipt["payment"] == {
+        "rail": "mpp", "payer": facts["payer"], "pay_to": facts["pay_to"], "amount_atomic": 20000,
+        "amount_usd": 0.02, "asset": facts["asset"], "network": "eip155:8453",
+        "tx_hash": facts["tx_hash"], "settled": True}
+    assert receipt["delivery"]["result_hash"] == W.ledger.canonical_hash({"answer": 42})
+    # The x402 gate's _bill still ran (it is a no-op for a prepaid MPP call).
+    assert billed == [0.02]
+
+
+def test_an_x402_payer_is_unaffected_by_the_mpp_fact_lookup(app_module, client, monkeypatch):
+    """With no MPP credential, the lookup is never consulted: an API-key call
+    still records no payer and reads delivered_not_settled."""
+    async def works(ctx, payload):
+        return {"ok": True}
+
+    _stub_skill(app_module, monkeypatch, "market.quote", works)
+    consulted = []
+    monkeypatch.setattr(app_module, "_bill", lambda auth, price_usd: None)
+    W.router.configure(
+        authorize_and_rate_limit=app_module._authorize_and_rate_limit,
+        bill=app_module._bill, deliver=app_module._deliver,
+        failed_response=app_module._failed_audit_response,
+        mpp_payment_facts=lambda cred: consulted.append(cred))
+    response = client.post("/work/market/quote", headers={"X-API-Key": "test-key"}, json={"product_id": "BTC-USD"})
+    assert response.status_code == 200
+    receipt = client.get(response.json()["receipt_url"]).json()
+    assert receipt["outcome"] == "delivered_not_settled" and receipt["payment"]["rail"] is None
+    assert consulted == []

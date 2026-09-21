@@ -63,9 +63,31 @@ SDK, not a guess):
 - MPP_TEMPO_CHAIN_ID              default 4217 (mainnet)
 - MPP_TEMPO_PRICE_BASE_UNITS      default "50000" ($0.05 at 6 decimals)
 
+EVM (draft-evm-charge-00, `type="hash"` ONLY) -- USDC on Base, for payers
+whose off-chain signatures no facilitator will verify (an EIP-7702 Coinbase
+Smart Wallet: proven 2026-09-21, CDP and PayAI both refuse its EIP-3009
+authorization at signature verification, and its ERC-1271 isValidSignature
+answers 0xffffffff for the EIP-3009 digest). With `hash` the payer broadcasts
+its own ERC-20 transfer and presents the confirmed transaction hash; the
+server verifies the receipt on Base and never verifies a signature. The
+spec's other three types (`permit2`, `authorization`, `transaction`) all
+need that signature and are refused here. Off unless the recipient is set:
+- MPP_EVM_RECIPIENT_ADDRESS       wallet that receives the USDC (the x402
+                                   pay-to, normally)
+- MPP_EVM_RPC_URL                 default "https://mainnet.base.org"
+- MPP_EVM_CHAIN_ID                default 8453 (Base mainnet)
+- MPP_EVM_TOKEN_ADDRESS           default Base USDC,
+                                   "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+- MPP_EVM_MAX_BASE_UNITS          default "10000000" ($10): the spec says
+                                   restrict `hash` to low value, because a
+                                   hash credential binds to amount+recipient,
+                                   not to one challenge instance
+
 Shared:
 - MPP_REALM                       default "wcag-audit-engine"
 - MPP_CHALLENGE_TTL_SECONDS       default "300"
+- MPP_CHALLENGE_SECRET            signs challenges when STRIPE_SECRET_KEY is
+                                   not set (the EVM rail needs no Stripe)
 """
 
 import base64
@@ -123,6 +145,18 @@ _TEMPO_TOKEN_ADDRESS = os.environ.get(
 _TEMPO_RECIPIENT_ADDRESS = os.environ.get("MPP_TEMPO_RECIPIENT_ADDRESS")
 _TEMPO_PRICE_BASE_UNITS = os.environ.get("MPP_TEMPO_PRICE_BASE_UNITS", "50000")
 
+# EVM `hash` rail. Defaults are Base mainnet and its USDC contract -- the same
+# network and asset every x402 402 on this node already names -- so a payer
+# that cannot sign for x402 pays the same amount, of the same token, to the
+# same wallet, by sending it itself.
+_EVM_RPC_URL = os.environ.get("MPP_EVM_RPC_URL", "https://mainnet.base.org")
+_EVM_CHAIN_ID = int(os.environ.get("MPP_EVM_CHAIN_ID", "8453"))
+_EVM_TOKEN_ADDRESS = os.environ.get(
+    "MPP_EVM_TOKEN_ADDRESS", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+)
+_EVM_RECIPIENT_ADDRESS = os.environ.get("MPP_EVM_RECIPIENT_ADDRESS")
+_EVM_MAX_BASE_UNITS = int(os.environ.get("MPP_EVM_MAX_BASE_UNITS", "10000000"))
+
 # keccak256("Transfer(address,address,uint256)") -- standard ERC-20/TIP-20 event topic.
 _TRANSFER_EVENT_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
@@ -131,7 +165,10 @@ _used_credentials: set = set()
 
 
 def _secret_key() -> Optional[bytes]:
-    stripe_key = os.environ.get("STRIPE_SECRET_KEY")
+    # STRIPE_SECRET_KEY stays the source when present (existing rails); the
+    # EVM rail involves no Stripe, so a deployment without Stripe can sign
+    # its challenges with MPP_CHALLENGE_SECRET instead.
+    stripe_key = os.environ.get("STRIPE_SECRET_KEY") or os.environ.get("MPP_CHALLENGE_SECRET")
     if not stripe_key:
         return None
     return hmac.new(stripe_key.encode(), b"mpp-challenge-signing", hashlib.sha256).digest()
@@ -244,8 +281,35 @@ def tempo_configured() -> bool:
     )
 
 
+_EVM_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def _evm_recipient_is_usable() -> bool:
+    address = (_EVM_RECIPIENT_ADDRESS or "").strip()
+    return bool(_EVM_ADDRESS_RE.match(address)) and int(address, 16) != 0
+
+
+def evm_configured() -> bool:
+    return bool(
+        _secret_key()
+        and _EVM_RPC_URL
+        and _EVM_ADDRESS_RE.match(_EVM_TOKEN_ADDRESS or "")
+        and _evm_recipient_is_usable()
+    )
+
+
+def evm_available_for(base_units) -> bool:
+    """The rail, gated on the amount: the spec advises restricting `hash`
+    credentials to low value, so a price above MPP_EVM_MAX_BASE_UNITS is
+    simply not offered on this rail."""
+    try:
+        return evm_configured() and 0 < int(base_units) <= _EVM_MAX_BASE_UNITS
+    except (TypeError, ValueError):
+        return False
+
+
 def is_configured() -> bool:
-    return stripe_configured() or tempo_configured()
+    return stripe_configured() or tempo_configured() or evm_configured()
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -385,7 +449,27 @@ def www_authenticate_headers(realm: Optional[str] = None, price_usd: Optional[fl
             },
         )
         headers.append(_www_authenticate_header(challenge))
+    if evm_available_for(tempo_price_base_units):
+        challenge = _build_challenge(
+            realm,
+            "evm",
+            "charge",
+            _evm_request(tempo_price_base_units),
+        )
+        headers.append(_www_authenticate_header(challenge))
     return headers
+
+
+def _evm_request(base_units: str) -> dict:
+    """The EVM method's challenge request (draft-evm-charge-00 request
+    schema): amount in base units, ERC-20 contract, EIP-55 recipient, chain,
+    and the one credential type this node accepts."""
+    return {
+        "amount": str(base_units),
+        "currency": _EVM_TOKEN_ADDRESS,
+        "recipient": _EVM_RECIPIENT_ADDRESS,
+        "methodDetails": {"chainId": _EVM_CHAIN_ID, "credentialTypes": ["hash"]},
+    }
 
 
 def accepts_entries(price_usd: Optional[float] = None) -> list:
@@ -428,6 +512,26 @@ def accepts_entries(price_usd: Optional[float] = None) -> list:
                 ),
                 "send_via_header": "Authorization: Payment ...",
                 "challenge_in": "WWW-Authenticate",
+            }
+        )
+    evm_units = str(round(price_usd * 1_000_000)) if price_usd is not None else _TEMPO_PRICE_BASE_UNITS
+    if evm_available_for(evm_units):
+        entries.append(
+            {
+                "protocol": "mpp",
+                "method": "evm",
+                "credential_types": ["hash"],
+                "asset": _EVM_TOKEN_ADDRESS,
+                "chain_id": _EVM_CHAIN_ID,
+                "network": f"eip155:{_EVM_CHAIN_ID}",
+                "recipient": _EVM_RECIPIENT_ADDRESS,
+                "amount_minor_units": evm_units,
+                "send_via_header": "Authorization: Payment ...",
+                "challenge_in": "WWW-Authenticate",
+                "note": (
+                    "Send the amount of this token to the recipient yourself, wait for "
+                    "the receipt, then present the transaction hash. No signature is "
+                    "verified, so smart-wallet payers can use this rail."),
             }
         )
     return entries
@@ -476,6 +580,17 @@ def discovery_offers(price_usd: float, description: Optional[str] = None) -> lis
                 **({"description": description} if description else {}),
                 "intent": "charge",
                 "method": "tempo",
+            }
+        )
+    evm_units = str(round(price_usd * 1_000_000))
+    if evm_available_for(evm_units):
+        offers.append(
+            {
+                "amount": evm_units,
+                "currency": _EVM_TOKEN_ADDRESS,
+                **({"description": description} if description else {}),
+                "intent": "charge",
+                "method": "evm",
             }
         )
     return offers
@@ -551,7 +666,10 @@ def _tempo_rpc(method: str, params: list) -> Optional[dict]:
     return body.get("result")
 
 
-def _receipt_matches(receipt: dict, request_obj: dict) -> bool:
+def _matching_transfer(receipt: dict, request_obj: dict) -> Optional[dict]:
+    """The first Transfer log in `receipt` that pays the challenge: right
+    token, right recipient, at least the amount. Returns its payer, recipient
+    and value, or None."""
     token_address = str(request_obj["currency"]).lower()
     recipient = str(request_obj["recipient"]).lower()
     expected_amount = int(request_obj["amount"])
@@ -571,8 +689,17 @@ def _receipt_matches(receipt: dict, request_obj: dict) -> bool:
         except ValueError:
             continue
         if amount >= expected_amount:
-            return True
-    return False
+            return {
+                "payer": "0x" + str(topics[1])[-40:],
+                "recipient": log_recipient,
+                "amount": amount,
+                "token": str(log.get("address", "")),
+            }
+    return None
+
+
+def _receipt_matches(receipt: dict, request_obj: dict) -> bool:
+    return _matching_transfer(receipt, request_obj) is not None
 
 
 def _verify_tempo(challenge: dict, payload: dict) -> bool:
@@ -602,6 +729,91 @@ def _verify_tempo(challenge: dict, payload: dict) -> bool:
     return True
 
 
+def _evm_rpc(method: str, params: list) -> Optional[dict]:
+    resp = httpx.post(
+        _EVM_RPC_URL,
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if "error" in body:
+        return None
+    return body.get("result")
+
+
+# What each verified EVM `hash` credential paid, keyed by transaction hash,
+# so the worker ledger can record the same facts an x402 settlement records
+# (payer, amount, asset, network, tx) and the receipt reads paid_delivered.
+# Bounded: entries are only ever needed for the request that just verified.
+_settlements: dict = {}
+_SETTLEMENTS_MAX = 5000
+
+
+def _verify_evm(challenge: dict, payload: dict) -> bool:
+    """draft-evm-charge-00 `hash` verification, exactly its five steps: hash
+    not consumed; eth_getTransactionReceipt; status 0x1; a Transfer log whose
+    address/to/value match the challenge; mark consumed. Every other
+    credential type needs a signature verified, which is what this rail
+    exists to avoid, so they fail closed."""
+    if not evm_configured():
+        return False
+    if payload.get("type") != "hash":
+        return False
+    tx_hash = payload.get("hash")
+    if not isinstance(tx_hash, str) or not re.match(r"^0x[0-9a-fA-F]{64}$", tx_hash):
+        return False
+    tx_hash = tx_hash.lower()
+    if tx_hash in _used_credentials:
+        return False
+    try:
+        request_obj = json.loads(_b64url_decode(challenge["request"]))
+        # The challenge is HMAC-bound, so these are ours; still refuse a
+        # challenge that names anything but this deployment's token and
+        # recipient, in case the configuration changed under a live one.
+        if str(request_obj.get("currency", "")).lower() != _EVM_TOKEN_ADDRESS.lower():
+            return False
+        if str(request_obj.get("recipient", "")).lower() != (_EVM_RECIPIENT_ADDRESS or "").lower():
+            return False
+        receipt = _evm_rpc("eth_getTransactionReceipt", [tx_hash])
+    except Exception:
+        return False
+    if not receipt:
+        return False
+    if str(receipt.get("status")) not in ("0x1", "1"):
+        return False
+    transfer = _matching_transfer(receipt, request_obj)
+    if transfer is None:
+        return False
+    if len(_settlements) >= _SETTLEMENTS_MAX:
+        _settlements.clear()
+    _settlements[tx_hash] = {
+        "rail": "mpp",
+        "method": "evm",
+        "payer": transfer["payer"],
+        "pay_to": transfer["recipient"],
+        "amount_atomic": transfer["amount"],
+        "asset": transfer["token"],
+        "network": f"eip155:{_EVM_CHAIN_ID}",
+        "tx_hash": tx_hash,
+    }
+    _used_credentials.add(tx_hash)
+    return True
+
+
+def settlement_for(authorization_header: str) -> Optional[dict]:
+    """The on-chain facts behind a verified EVM `hash` credential, for the
+    ledger and the receipt. None for any other credential, or before
+    verification. Never raises."""
+    try:
+        decoded = json.loads(_b64url_decode(authorization_header))
+        tx_hash = str((decoded.get("payload") or {}).get("hash") or "").lower()
+        facts = _settlements.get(tx_hash)
+        return dict(facts) if facts else None
+    except Exception:
+        return None
+
+
 def verify_and_settle_sync(authorization_header: str, realm: Optional[str] = None) -> bool:
     """Verify + settle an `Authorization: Payment <base64url-json>` header.
 
@@ -629,6 +841,8 @@ def verify_and_settle_sync(authorization_header: str, realm: Optional[str] = Non
             return _verify_stripe(challenge, payload)
         if method == "tempo":
             return _verify_tempo(challenge, payload)
+        if method == "evm":
+            return _verify_evm(challenge, payload)
         return False
     except Exception:
         return False
