@@ -23,6 +23,9 @@ Money is in MICROS (1e-6 USD): a token-priced call costing $0.000075 is
 normal, and cents would round most real costs to zero.
 """
 
+import datetime
+import hashlib
+import json
 import logging
 import os
 import sqlite3
@@ -84,6 +87,38 @@ CREATE TABLE IF NOT EXISTS monitor_snapshots (
 """
 
 
+# Columns added after the table first shipped. CREATE TABLE IF NOT EXISTS
+# cannot add them to a database that already exists (the box has one), so
+# they are added here, once, when missing. Each is nullable: old rows simply
+# have no hash, and the receipt says so rather than inventing one.
+_RECEIPT_COLUMNS = (
+    ("request_hash", "TEXT"),   # sha256 of the canonical request body
+    ("result_hash", "TEXT"),    # sha256 of the canonical delivered result
+    ("network", "TEXT"),        # CAIP-2 network the payment settled on
+    ("asset", "TEXT"),          # asset contract the payment was made in
+    ("pay_to", "TEXT"),         # wallet the payment was made to
+    ("amount_atomic", "INTEGER"),  # exact settled amount in the asset's atomic units
+    ("node_version", "TEXT"),   # SERVICE_VERSION of the node that ran the job
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    have = {row[1] for row in conn.execute("PRAGMA table_info(worker_calls)")}
+    for name, kind in _RECEIPT_COLUMNS:
+        if name not in have:
+            conn.execute(f"ALTER TABLE worker_calls ADD COLUMN {name} {kind}")
+    conn.commit()
+
+
+def canonical_hash(value) -> str:
+    """sha256 over canonical JSON (sorted keys, no whitespace), prefixed with
+    the algorithm so a verifier knows exactly what to recompute from the
+    body it received."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False, default=str).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def _connect() -> Optional[sqlite3.Connection]:
     """Open the ledger once, degrading to in-memory if the path is unwritable.
 
@@ -111,6 +146,7 @@ def _connect() -> Optional[sqlite3.Connection]:
             if candidate != ":memory:":
                 conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
+            _migrate(conn)
             conn.commit()
             _conn, _configured_path, _degraded = conn, target, degraded
             _last_error = f"ledger degraded to in-memory: {target} unwritable" if degraded else None
@@ -174,7 +210,7 @@ def _note(exc: Exception) -> None:
 
 
 def open_call(call_id, worker, path, price_usd, idempotency_key=None,
-              payer=None, rail=None) -> None:
+              payer=None, rail=None, request_hash=None, node_version=None) -> None:
     """Written BEFORE the provider runs, so a crash leaves evidence."""
     with _lock:
         conn = _safe_connect()
@@ -183,9 +219,10 @@ def open_call(call_id, worker, path, price_usd, idempotency_key=None,
         try:
             conn.execute(
                 "INSERT OR REPLACE INTO worker_calls (call_id, idempotency_key, worker, "
-                "path, started_at, status, price_micros, payer, rail) VALUES (?,?,?,?,?,?,?,?,?)",
+                "path, started_at, status, price_micros, payer, rail, request_hash, "
+                "node_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (call_id, idempotency_key, worker, path, time.time(), "running",
-                 usd_to_micros(price_usd), payer, rail))
+                 usd_to_micros(price_usd), payer, rail, request_hash, node_version))
             conn.commit()
         except Exception as exc:
             _note(exc)
@@ -214,7 +251,9 @@ def record_provider_call(call_id, provider, attempt, started_at, ok,
 
 def close_call(call_id, status_value, latency_ms=None, provider_used=None,
                providers_tried=None, attempts=0, failure_reason=None,
-               failure_stage=None, settled=False, tx_hash=None, payer=None) -> None:
+               failure_stage=None, settled=False, tx_hash=None, payer=None,
+               result_hash=None, network=None, asset=None, pay_to=None,
+               amount_atomic=None) -> None:
     """Finish the row, summing attempt costs.
 
     `cost_measured` is 1 only when EVERY attempt reported a measured cost; one
@@ -234,14 +273,128 @@ def close_call(call_id, status_value, latency_ms=None, provider_used=None,
             conn.execute(
                 "UPDATE worker_calls SET finished_at=?, status=?, latency_ms=?, provider_used=?, "
                 "providers_tried=?, attempts=?, failure_reason=?, failure_stage=?, settled=?, "
-                "tx_hash=?, provider_cost_micros=?, cost_measured=?, payer=COALESCE(?,payer) "
-                "WHERE call_id=?",
+                "tx_hash=?, provider_cost_micros=?, cost_measured=?, payer=COALESCE(?,payer), "
+                "result_hash=COALESCE(?,result_hash), network=COALESCE(?,network), "
+                "asset=COALESCE(?,asset), pay_to=COALESCE(?,pay_to), "
+                "amount_atomic=COALESCE(?,amount_atomic) WHERE call_id=?",
                 (time.time(), status_value, latency_ms, provider_used, providers_tried,
                  attempts, failure_reason, failure_stage, 1 if settled else 0, tx_hash,
-                 total, 1 if (n > 0 and measured == n) else 0, payer, call_id))
+                 total, 1 if (n > 0 and measured == n) else 0, payer,
+                 result_hash, network, asset, pay_to, amount_atomic, call_id))
             conn.commit()
         except Exception as exc:
             _note(exc)
+
+
+# --- receipts ---------------------------------------------------------------
+#
+# A receipt is the worker_calls row, read back in a fixed machine-readable
+# shape. It asserts nothing the row does not record: `paid` is the settled
+# flag, `delivered` is the status, and the outcome is derived from the two,
+# so a settled payment whose job did not deliver can never read as delivered.
+
+RECEIPT_PREFIX = "rcpt_"
+
+
+def receipt_id_for(call_id: str) -> str:
+    return RECEIPT_PREFIX + call_id
+
+
+def call_id_for(receipt_id: str) -> Optional[str]:
+    if not receipt_id or not receipt_id.startswith(RECEIPT_PREFIX):
+        return None
+    call_id = receipt_id[len(RECEIPT_PREFIX):]
+    return call_id if call_id.isalnum() else None
+
+
+def get_call(call_id: str) -> Optional[dict]:
+    with _lock:
+        conn = _safe_connect()
+        if conn is None:
+            return None
+        try:
+            row = conn.execute("SELECT * FROM worker_calls WHERE call_id=?", (call_id,)).fetchone()
+            return dict(row) if row else None
+        except Exception as exc:
+            _note(exc)
+            return None
+
+
+def _iso(ts) -> Optional[str]:
+    if ts is None:
+        return None
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat(
+        timespec="milliseconds").replace("+00:00", "Z")
+
+
+def outcome_of(row: dict) -> str:
+    paid = bool(row.get("settled"))
+    status = row.get("status")
+    if paid:
+        return "paid_delivered" if status == "ok" else "paid_failed"
+    if status == "ok":
+        # Delivered on a credential rail (API key, subscription): no x402
+        # settlement to point at, which is different from "not paid for".
+        return "delivered_not_settled"
+    if status == "refused":
+        return "unpaid_refused"
+    if status == "running":
+        return "running"
+    return "unpaid_failed"
+
+
+def receipt_for(call_id: str) -> Optional[dict]:
+    row = get_call(call_id)
+    if row is None:
+        return None
+    outcome = outcome_of(row)
+    paid = bool(row.get("settled"))
+    delivered = row.get("status") == "ok"
+    return {
+        "receipt_version": 1,
+        "receipt_id": receipt_id_for(call_id),
+        "request_id": call_id,
+        "outcome": outcome,
+        "paid": paid,
+        "delivered": delivered,
+        "payment": {
+            "rail": row.get("rail"),
+            "payer": row.get("payer"),
+            "pay_to": row.get("pay_to"),
+            # The settled amount exactly as the rail reported it; older rows
+            # (before this column) fall back to the catalog price in micros,
+            # which for USDC (6 decimals) is the same number.
+            "amount_atomic": (row.get("amount_atomic") or row.get("price_micros")) if paid else None,
+            "amount_usd": micros_to_usd(row.get("price_micros")) if paid else None,
+            "asset": row.get("asset"),
+            "network": row.get("network"),
+            "tx_hash": row.get("tx_hash"),
+            "settled": paid,
+        },
+        "request": {
+            "worker": row.get("worker"),
+            "path": row.get("path"),
+            "price_usd": micros_to_usd(row.get("price_micros")),
+            "request_hash": row.get("request_hash"),
+        },
+        "execution": {
+            "status": row.get("status"),
+            "failure_reason": row.get("failure_reason"),
+            "failure_stage": row.get("failure_stage"),
+            "provider_used": row.get("provider_used"),
+            "attempts": row.get("attempts"),
+            "latency_ms": row.get("latency_ms"),
+            "started_at": _iso(row.get("started_at")),
+            "finished_at": _iso(row.get("finished_at")),
+        },
+        "delivery": {
+            "delivered": delivered,
+            "result_hash": row.get("result_hash") if delivered else None,
+        },
+        "node_version": row.get("node_version"),
+        "timestamp": _iso(row.get("finished_at") or row.get("started_at")),
+        "hash_alg": "sha256 over canonical JSON (sort_keys, separators (',', ':'), utf-8)",
+    }
 
 
 # --- idempotency ------------------------------------------------------------

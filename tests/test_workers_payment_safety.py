@@ -479,3 +479,68 @@ def test_a_worker_above_the_client_cap_tells_the_buyer_how_to_lift_it(client):
     paths = client.get("/openapi.json").json()["paths"]
     assert paths[dear.path]["post"]["x-buyer-note"] == by_name[dear.name]["buyer_note"]
     assert "x-buyer-note" not in paths[cheap.path]["post"]
+
+
+# --- receipts: response carries the id, the endpoint reproduces the row ------
+
+def test_a_delivered_job_carries_a_retrievable_receipt(app_module, client, monkeypatch):
+    async def works(ctx, payload):
+        return {"answer": 42, "echo": payload}
+
+    _stub_skill(app_module, monkeypatch, "market.quote", works)
+    monkeypatch.setattr(app_module, "_bill", lambda auth, price_usd: None)
+    W.router.configure(
+        authorize_and_rate_limit=app_module._authorize_and_rate_limit,
+        bill=app_module._bill, deliver=app_module._deliver,
+        failed_response=app_module._failed_audit_response, node_version="test-1")
+
+    body = {"product_id": "BTC-USD"}
+    response = client.post("/work/market/quote", headers={"X-API-Key": "test-key"}, json=body)
+    assert response.status_code == 200
+    delivered = response.json()
+    receipt_id = delivered["receipt_id"]
+    assert receipt_id.startswith("rcpt_") and delivered["receipt_url"] == f"/work/receipts/{receipt_id}"
+
+    receipt = client.get(delivered["receipt_url"]).json()
+    assert receipt["receipt_id"] == receipt_id
+    assert receipt["request_id"] == receipt_id[len("rcpt_"):]
+    # Delivered on an API key: no x402 settlement exists, and the receipt says so.
+    assert receipt["outcome"] == "delivered_not_settled"
+    assert receipt["paid"] is False and receipt["delivered"] is True
+    assert receipt["payment"]["tx_hash"] is None and receipt["payment"]["settled"] is False
+    # The hashes are recomputable from what the buyer sent and received.
+    assert receipt["request"]["request_hash"] == W.ledger.canonical_hash(body)
+    assert receipt["delivery"]["result_hash"] == W.ledger.canonical_hash(delivered["result"])
+    assert receipt["request"]["worker"] == "market.quote" and receipt["request"]["price_usd"] == 0.02
+    assert receipt["execution"]["status"] == "ok" and receipt["node_version"] == "test-1"
+    # Retrievable by request_id as well.
+    assert client.get(f"/work/receipts/{receipt['request_id']}").json()["receipt_id"] == receipt_id
+
+
+def test_a_failed_job_has_a_receipt_that_says_unpaid_and_undelivered(app_module, client, monkeypatch):
+    async def always_fails(ctx, payload):
+        raise W.runtime.TransientProviderError("provider is down", reason="provider_down")
+
+    _stub_skill(app_module, monkeypatch, "market.quote", always_fails)
+    monkeypatch.setattr(app_module, "_bill", lambda auth, price_usd: None)
+    W.router.configure(
+        authorize_and_rate_limit=app_module._authorize_and_rate_limit,
+        bill=app_module._bill, deliver=app_module._deliver,
+        failed_response=app_module._failed_audit_response)
+
+    response = client.post("/work/market/quote", headers={"X-API-Key": "test-key"},
+                           json={"product_id": "BTC-USD"})
+    assert response.status_code == 502
+    receipt_id = response.json()["receipt_id"]
+    receipt = client.get(f"/work/receipts/{receipt_id}").json()
+    assert receipt["outcome"] == "unpaid_failed"
+    assert receipt["paid"] is False and receipt["delivered"] is False
+    assert receipt["delivery"] == {"delivered": False, "result_hash": None}
+    assert receipt["payment"]["amount_atomic"] is None and receipt["payment"]["tx_hash"] is None
+    assert receipt["execution"]["status"] == "failed"
+    assert receipt["execution"]["failure_reason"] == "provider_down"
+
+
+def test_an_unknown_receipt_is_a_404(client):
+    assert client.get("/work/receipts/rcpt_doesnotexist").status_code == 404
+    assert client.get("/work/receipts/../etc").status_code in (404, 400)

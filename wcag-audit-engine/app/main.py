@@ -3409,6 +3409,7 @@ if workers is not None:
     try:
         workers.configure(
             authorize_and_rate_limit=_authorize_and_rate_limit,
+            node_version=SERVICE_VERSION,
             bill=_bill,
             deliver=_deliver,
             failed_response=_failed_audit_response,

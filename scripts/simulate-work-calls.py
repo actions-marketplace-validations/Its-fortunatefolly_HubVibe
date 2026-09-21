@@ -104,6 +104,15 @@ def _bodies() -> dict:
     return bodies
 
 
+def _canonical_hash(value) -> str:
+    """Recomputed here, independently of the node, from the delivered body:
+    the same recipe the receipt states (sha256 over canonical JSON)."""
+    import hashlib
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False, default=str).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def _excerpt(value, limit=160) -> str:
     text = json.dumps(value, default=str)
     for key in ("image_base64", "audio_base64", "video_base64"):
@@ -250,6 +259,17 @@ def main() -> int:
                                               f"Bazaar record valid ({verifies[0].get('bazaar') if verifies else 'no verify'})")
             else:
                 row["payment"] = checks.expect(not settles, "failed call was NOT settled")
+
+            if paid.status_code == 200 and isinstance(content, dict):
+                receipt_id = content.get("receipt_id")
+                rec = _get(f"{base}/work/receipts/{receipt_id}") if receipt_id else {}
+                row["receipt"] = checks.expect(
+                    bool(receipt_id) and rec.get("outcome") == "paid_delivered"
+                    and rec.get("payment", {}).get("tx_hash") == tx
+                    and rec.get("payment", {}).get("amount_atomic") == want
+                    and rec.get("delivery", {}).get("result_hash") == _canonical_hash(result),
+                    f"receipt {receipt_id}: paid_delivered, tx + amount match settle, "
+                    f"result hash matches delivered result")
 
             with sqlite3.connect(ledger_path) as db:
                 call = db.execute(

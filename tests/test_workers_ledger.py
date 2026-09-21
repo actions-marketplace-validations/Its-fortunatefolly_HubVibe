@@ -227,3 +227,100 @@ def test_a_wedged_credential_lookup_is_not_retried_on_every_call(monkeypatch):
     for _ in range(3):
         google_auth.configured()
     assert calls["n"] == 1, "the wedged lookup must be attempted once and cached"
+
+
+# --- receipts ---------------------------------------------------------------
+
+def test_receipt_columns_are_added_to_a_database_created_before_them(monkeypatch, tmp_path):
+    """The box's ledger predates the receipt columns; CREATE TABLE IF NOT
+    EXISTS cannot add them, the migration must."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(str(path))
+    old.executescript(ledger._SCHEMA.replace("request_hash", "x_request_hash"))  # baseline schema
+    old.execute("DROP TABLE worker_calls")
+    old.execute("CREATE TABLE worker_calls (call_id TEXT PRIMARY KEY, idempotency_key TEXT, "
+                "worker TEXT NOT NULL, path TEXT NOT NULL, started_at REAL NOT NULL, "
+                "finished_at REAL, status TEXT NOT NULL, failure_reason TEXT, failure_stage TEXT, "
+                "price_micros INTEGER NOT NULL, provider_cost_micros INTEGER, cost_measured INTEGER "
+                "NOT NULL DEFAULT 0, provider_used TEXT, providers_tried TEXT, attempts INTEGER NOT "
+                "NULL DEFAULT 0, latency_ms INTEGER, payer TEXT, tx_hash TEXT, settled INTEGER NOT "
+                "NULL DEFAULT 0, rail TEXT)")
+    old.commit(); old.close()
+
+    monkeypatch.setenv("WORKER_LEDGER_PATH", str(path))
+    ledger.reset_for_tests()
+    ledger.open_call("c1", "market.quote", "/work/market/quote", 0.02, request_hash="sha256:aa")
+    columns = {r[1] for r in sqlite3.connect(str(path)).execute("PRAGMA table_info(worker_calls)")}
+    assert {"request_hash", "result_hash", "network", "asset", "pay_to", "amount_atomic",
+            "node_version"} <= columns
+    assert ledger.get_call("c1")["request_hash"] == "sha256:aa"
+
+
+def test_canonical_hash_is_order_independent_and_stable():
+    a = ledger.canonical_hash({"b": 1, "a": [1, 2, {"z": None, "y": "\u00e9"}]})
+    b = ledger.canonical_hash({"a": [1, 2, {"y": "\u00e9", "z": None}], "b": 1})
+    assert a == b and a.startswith("sha256:") and len(a) == len("sha256:") + 64
+    assert ledger.canonical_hash({"b": 2, "a": 1}) != a
+
+
+# The maps.weather call from the 2026-09-21 seed, as the box ledger recorded
+# it and as Base recorded it: payer OX1, 100000 atomic USDC, one transaction.
+# The receipt for it must reproduce those exact facts and nothing invented.
+SEED_CALL = {
+    "call_id": "932ae60bc0414d6a9fa3d341841c8768", "worker": "maps.weather",
+    "path": "/work/maps/weather", "price_usd": 0.10,
+    "payer": "0x104feA79F30b4fB4Da86B6D65951217F914bdd35",
+    "tx_hash": "0x1eb590fc6cfb1403747b4c8c67925401d00efd00a543b0c4a4ad0a99660887ae",
+    "pay_to": "0x837C40E2B4e976f43Ffb4451eE281A00fA9477dd",
+    "network": "eip155:8453", "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "amount_atomic": 100000, "provider_used": "maps-grounding-lite", "latency_ms": 962,
+}
+
+
+def test_receipt_reconciles_a_real_settled_transaction(db):
+    c = SEED_CALL
+    ledger.open_call(c["call_id"], c["worker"], c["path"], c["price_usd"], payer=c["payer"],
+                     rail="x402", request_hash="sha256:" + "1" * 64, node_version="1.4.0")
+    result_hash = ledger.canonical_hash({"location": "San Francisco, CA", "result": {"cloudCover": 54}})
+    ledger.close_call(c["call_id"], "ok", latency_ms=c["latency_ms"], provider_used=c["provider_used"],
+                      attempts=1, settled=True, tx_hash=c["tx_hash"], payer=c["payer"],
+                      result_hash=result_hash, network=c["network"], asset=c["asset"],
+                      pay_to=c["pay_to"], amount_atomic=c["amount_atomic"])
+
+    r = ledger.receipt_for(c["call_id"])
+    assert r["receipt_id"] == "rcpt_" + c["call_id"] and r["request_id"] == c["call_id"]
+    assert r["outcome"] == "paid_delivered" and r["paid"] is True and r["delivered"] is True
+    assert r["payment"] == {
+        "rail": "x402", "payer": c["payer"], "pay_to": c["pay_to"],
+        "amount_atomic": 100000, "amount_usd": 0.10, "asset": c["asset"],
+        "network": c["network"], "tx_hash": c["tx_hash"], "settled": True}
+    assert r["request"]["worker"] == "maps.weather" and r["request"]["price_usd"] == 0.10
+    assert r["request"]["request_hash"] == "sha256:" + "1" * 64
+    assert r["delivery"] == {"delivered": True, "result_hash": result_hash}
+    assert r["execution"]["status"] == "ok" and r["execution"]["provider_used"] == "maps-grounding-lite"
+    assert r["node_version"] == "1.4.0"
+    assert r["timestamp"].endswith("Z") and r["execution"]["finished_at"] == r["timestamp"]
+    assert ledger.call_id_for(r["receipt_id"]) == c["call_id"]
+    assert ledger.receipt_for("no-such-call") is None
+
+
+def test_receipt_outcomes_never_call_an_unsettled_or_failed_job_delivered(db):
+    cases = [
+        ("ok", True, "paid_delivered", True, True),
+        ("failed", True, "paid_failed", True, False),      # would be a bug elsewhere; still honest
+        ("failed", False, "unpaid_failed", False, False),
+        ("refused", False, "unpaid_refused", False, False),
+        ("ok", False, "delivered_not_settled", False, True),
+    ]
+    for i, (status, settled, outcome, paid, delivered) in enumerate(cases):
+        cid = f"case{i}"
+        ledger.open_call(cid, "market.quote", "/work/market/quote", 0.02, payer="0xabc" if settled else None)
+        ledger.close_call(cid, status, settled=settled, tx_hash="0xtx" if settled else None,
+                          result_hash="sha256:r" if status == "ok" else None,
+                          failure_reason=None if status == "ok" else "provider_down")
+        r = ledger.receipt_for(cid)
+        assert (r["outcome"], r["paid"], r["delivered"]) == (outcome, paid, delivered), cid
+        assert r["delivery"]["result_hash"] == ("sha256:r" if delivered else None)
+        assert r["payment"]["amount_atomic"] == (20000 if paid else None)

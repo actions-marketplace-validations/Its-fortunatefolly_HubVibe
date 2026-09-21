@@ -57,6 +57,10 @@ _bill: Optional[Callable] = None
 _deliver: Optional[Callable] = None
 _failed: Optional[Callable] = None
 _configured = False
+# The node's SERVICE_VERSION, stamped on every ledger row so a receipt names
+# the build that ran the job. Injected because this module cannot import
+# app.main.
+_node_version: Optional[str] = None
 
 MAX_CONCURRENT_WORKERS = int(os.environ.get("MAX_CONCURRENT_WORKERS", "8"))
 _semaphore: Optional[asyncio.Semaphore] = None
@@ -68,9 +72,12 @@ _executor: Optional[ThreadPoolExecutor] = None
 
 
 def configure(authorize_and_rate_limit, bill, deliver, failed_response,
-              with_page=None, goto_guarded=None, blocked_target_reason=None) -> None:
+              with_page=None, goto_guarded=None, blocked_target_reason=None,
+              node_version=None) -> None:
     """Hand the worker network the core's payment gate and browser pool."""
     global _authorize, _bill, _deliver, _failed, _executor, _semaphore, _configured
+    global _node_version
+    _node_version = node_version
     _authorize = authorize_and_rate_limit
     _bill = bill
     _deliver = deliver
@@ -129,6 +136,49 @@ def _payer_of(auth) -> Optional[str]:
         return authorization.get("from") or None
     except Exception:
         return None
+
+
+def _payment_facts_of(auth) -> dict:
+    """The on-chain facts of this call's payment, for the receipt: network,
+    asset, pay-to wallet, exact settled amount, transaction hash.
+
+    Read off the accepted requirement and the facilitator's settle response
+    the same way _payer_of reads the payer: by attribute, never by importing
+    the payment layer. Any shape surprise yields an empty field, never a
+    failed delivery -- and the receipt then says that field is unknown.
+    """
+    facts = {"network": None, "asset": None, "pay_to": None,
+             "amount_atomic": None, "tx_hash": None}
+    pending = getattr(auth, "pending_payment", None)
+    if pending is None:
+        return facts
+
+    def field(obj, *names):
+        for name in names:
+            value = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+            if value not in (None, ""):
+                return value
+        return None
+
+    try:
+        requirements = getattr(pending, "requirements", None) or []
+        accepted = requirements[0] if requirements else None
+        if accepted is not None:
+            facts["network"] = field(accepted, "network")
+            facts["asset"] = field(accepted, "asset")
+            facts["pay_to"] = field(accepted, "pay_to", "payTo")
+            amount = field(accepted, "amount", "max_amount_required", "maxAmountRequired")
+            facts["amount_atomic"] = int(amount) if amount is not None else None
+        result = getattr(pending, "settle_result", None)
+        if result is not None:
+            facts["tx_hash"] = field(result, "transaction")
+            facts["network"] = field(result, "network") or facts["network"]
+            amount = field(result, "amount")
+            if amount is not None:
+                facts["amount_atomic"] = int(amount)
+    except Exception:
+        pass
+    return facts
 
 
 def _tx_of(auth) -> Optional[str]:
@@ -259,7 +309,9 @@ def _make_handler(worker):
 
         ledger.open_call(call_id=call_id, worker=worker.name, path=worker.path,
                          price_usd=worker.price_usd, idempotency_key=idempotency_key,
-                         payer=payer, rail="x402" if payer else None)
+                         payer=payer, rail="x402" if payer else None,
+                         request_hash=ledger.canonical_hash(payload),
+                         node_version=_node_version)
 
         try:
             async with _semaphore:
@@ -287,6 +339,7 @@ def _make_handler(worker):
                 body = json.loads(bytes(response.body).decode())
                 body["reason"] = exc.reason
                 body["worker"] = worker.name
+                body["receipt_id"] = ledger.receipt_id_for(call_id)
                 # The core's headers minus the ones describing ITS body: the
                 # body just grew, and a copied Content-Length made every
                 # failed worker call die mid-response instead of a clean 502.
@@ -309,17 +362,26 @@ def _make_handler(worker):
         warning = await asyncio.get_running_loop().run_in_executor(
             _executor, lambda: _bill(auth, worker.price_usd))
 
+        # The receipt: the ledger row read back, at /work/receipts/{id}. Its
+        # id is in the delivered body (so an idempotent replay returns the
+        # same one) and the result hash is written to the row before the
+        # response leaves, so the receipt can never describe a delivery the
+        # caller did not get.
+        receipt_id = ledger.receipt_id_for(call_id)
         content = {
             "status": "ok",
             "worker": worker.name,
             "price_usd": worker.price_usd,
             "result": result,
             "provenance": ctx.provenance(),
+            "receipt_id": receipt_id,
+            "receipt_url": f"/work/receipts/{receipt_id}",
         }
         if warning:
             content["billing_warning"] = warning
 
         delivered = _deliver(content, auth)
+        facts = _payment_facts_of(auth)
 
         # _deliver returns the payable 402 instead when the facilitator
         # REFUSED to settle. Nothing was earned, so nothing is stored under
@@ -331,7 +393,10 @@ def _make_handler(worker):
             provider_used=",".join(ctx.providers_used) or None,
             providers_tried=",".join(ctx.providers_used) or None,
             attempts=len(ctx.attempts), settled=not refused and payer is not None,
-            tx_hash=_tx_of(auth), payer=payer)
+            tx_hash=_tx_of(auth) or facts["tx_hash"], payer=payer,
+            result_hash=ledger.canonical_hash(result),
+            network=facts["network"], asset=facts["asset"],
+            pay_to=facts["pay_to"], amount_atomic=facts["amount_atomic"])
 
         if idempotency_key and claimed:
             if refused:
@@ -402,5 +467,23 @@ async def work_index():
         "idempotency": (
             "Send an Idempotency-Key header to make retries safe: a repeated key "
             "returns the stored result and is not charged again."),
+        "receipts": (
+            "Every response carries a receipt_id. GET /work/receipts/{receipt_id} "
+            "(or /work/receipts/{request_id}) returns the machine-readable receipt: "
+            "payer, pay_to, amount, asset, network, transaction hash, execution "
+            "status, and sha256 hashes of the request and the delivered result."),
         "providers": provider_health(),
     }
+
+
+@router.get("/work/receipts/{receipt_id}", tags=["workers"])
+async def work_receipt(receipt_id: str):
+    """The receipt for one job, by receipt_id or request_id. Free: it holds
+    on-chain facts and hashes, never the delivered result."""
+    call_id = ledger.call_id_for(receipt_id) or (receipt_id if receipt_id.isalnum() else None)
+    receipt = ledger.receipt_for(call_id) if call_id else None
+    if receipt is None:
+        return JSONResponse(status_code=404, content={
+            "status": "error", "reason": "unknown_receipt",
+            "detail": "No job with this receipt_id or request_id on this node."})
+    return receipt
