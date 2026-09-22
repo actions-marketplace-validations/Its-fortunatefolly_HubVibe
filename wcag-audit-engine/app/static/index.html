@@ -1,531 +1,232 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HubVibe — machine-payable services for AI agents</title>
-<meta name="description" content="A machine-service gateway for autonomous agents: site compliance audits, LLM inference, web search and extraction, blockchain and market data, media generation, sandboxed compute. Software pays per call over HTTP 402 -- no account, no subscription.">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1024">
+<title>HubVibe: 37 Machine-Payable Dev Utilities and WCAG Audits</title>
+<meta name="description" content="HubVibe: infrastructure for the machine economy. Agents, APIs, payments, real work.">
 <link rel="canonical" href="https://hubvibe-io.com/">
-<link rel="ard" href="https://hubvibe-io.com/.well-known/ard.json">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<meta name="theme-color" content="#000000">
-<!-- Base app registration. Base's verifier fetches this page and reads this
-     tag to confirm the domain belongs to the app, so it must be live on / at
-     the moment Register is pressed -- a deploy that lands after verification
-     is a deploy that verified nothing. Public identifier, not a secret.
-
-     Written self-closing (" />"), byte-identical to the snippet Base's Add
-     Domain dialog hands out. An HTML parser treats <meta ...> and
-     <meta ... /> as the same element, but a verifier that string-matches
-     its own snippet does not, and that failure is silent: the tag is
-     present, the page is correct, and registration simply never completes.
-     Matching the vendor's exact bytes costs nothing and removes the
-     guess.
-
-     The id below is the one the owner's Add Domain dialog was serving on
-     2026-09-07, read off the dashboard. It REPLACED 6a8383066ea1f57fed333625,
-     which this page carried since #84: as ObjectIDs the two were minted 35
-     seconds apart, so the app was created twice and the dashboard finished
-     setup on the second. One page can prove one app -- the tag is singular
-     and two would verify neither -- so it names the app whose setup is
-     actually open. If Base ever asks for the older id again, swap it back
-     here and in its test; nothing else reads it. -->
-<meta name="base:app_id" content="6a83832901463168d7e651ca" />
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="HubVibe">
-<meta property="og:title" content="HubVibe — machine-payable services for AI agents">
-<meta property="og:description" content="A machine-service gateway: audits, AI inference, search, extraction, chain and market data, media, compute -- paid machine-to-machine over HTTP 402.">
+<link rel="ard" href="https://hubvibe-io.com/.well-known/ard.json">
+<meta property="og:title" content="HubVibe: 37 Machine-Payable Dev Utilities and WCAG Audits">
+<meta property="og:description" content="Infrastructure for the machine economy. Agents, APIs, payments, real work.">
 <meta property="og:url" content="https://hubvibe-io.com/">
 <meta property="og:image" content="https://hubvibe-io.com/og-image.png">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="HubVibe — machine-payable services: audits, AI, search, blockchain, market data, media, compute.">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="HubVibe — machine-payable services for AI agents">
-<meta name="twitter:description" content="A machine-service gateway for autonomous agents, paid machine-to-machine over HTTP 402.">
-<meta name="twitter:image" content="https://hubvibe-io.com/og-image.png">
-<script type="application/ld+json">
-{
-  "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  "name": "HubVibe",
-  "applicationCategory": "DeveloperApplication",
-  "operatingSystem": "Any",
-  "url": "https://hubvibe-io.com/",
-  "description": "Machine-service gateway for autonomous agents: site compliance audits, LLM inference, web search and extraction, blockchain and market data, prediction-market data, media generation and sandboxed compute. Machine-payable per call over HTTP 402.",
-  "featureList": [
-    "WCAG 2.1 A/AA accessibility audit via axe-core",
-    "SEO structure and metadata audit",
-    "Security response-header audit",
-    "Performance measurement from a real page load",
-    "LLM inference (Claude, Gemini, OpenAI) with failover",
-    "Web search, fetch and content extraction",
-    "Read-only blockchain RPC on Base",
-    "Market and prediction-market data",
-    "Image and voice generation",
-    "Sandboxed code execution",
-    "Composite research jobs with cited sources",
-    "HTTP 402 machine payments, no account required"
-  ],
-  "provider": {"@type": "Organization", "name": "HubVibe", "url": "https://hubvibe-io.com/"}
-}
-</script>
+<meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --bg: #000000;
-    --surface: #0a0a0b;
-    --surface-2: #101012;
-    --line: #1e1e21;
-    --line-bright: #2a2a2e;
-    --text: #f4ede6;
-    --muted: #8d8d94;
-    --dim: #63636a;
-    --accent: #ff8a2a;
-    --accent-soft: #fde4ce;
-    --ok: #4ade80;
-    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
+:root {
+  --bg: #000000; --ink: #FFFFFF; --muted: #C9CBD6; --dim: #8E90A0; --line: #1E1E28;
+  --orange: #FF7B00; --purple: #8F7CFF; --blue: #3FD3FF; --green: #22E38A; --violet: #7A3CFF;
+  --w: 1024px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { background: var(--bg); }
+body { min-width: 1024px; background: var(--bg); color: var(--ink); font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; overflow-x: hidden; }
+a { color: inherit; text-decoration: none; }
+.wrap { width: 100%; max-width: var(--w); margin: 0 auto; }
+.caps { text-transform: uppercase; letter-spacing: 0.22em; }
 
-  * { box-sizing: border-box; }
+/* ---- header over the artwork ---- */
+.hero { position: relative; width: 100%; max-width: var(--w); margin: 0 auto; }
+.hero-art { display: block; width: 100%; height: auto; }
+.nav { position: absolute; top: 0; left: 0; right: 0; height: 76px; display: flex; align-items: center; justify-content: space-between; padding: 0 30px; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand img { height: 56px; width: auto; display: block; }
+.brand-name { font-size: 22px; font-weight: 700; line-height: 1.1; }
+.brand-sub { font-size: 8px; color: var(--purple); letter-spacing: 0.28em; text-transform: uppercase; margin-top: 3px; }
+.links { display: flex; align-items: center; gap: 22px; }
+.links a { font-size: 10px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; }
+.links a:hover { color: var(--orange); }
+.pill { border: 1px solid var(--orange); color: var(--orange); border-radius: 999px; padding: 9px 20px; font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; white-space: nowrap; }
+.pill:hover { background: var(--orange); color: #000; }
+.side { position: absolute; top: 132px; font-size: 10px; font-weight: 500; color: var(--purple); letter-spacing: 0.28em; text-transform: uppercase; line-height: 1.9; }
+.side::after { content: ""; display: block; width: 40px; height: 2px; background: var(--purple); margin-top: 14px; }
+.side.l { left: 70px; }
+.side.r { right: 70px; text-align: left; }
+.tagline { position: absolute; left: 0; right: 0; bottom: 22px; text-align: center; }
+.tagline h1 { font-size: 26px; font-weight: 300; letter-spacing: 0.01em; }
+.tagline p { margin-top: 10px; font-size: 10px; font-weight: 600; color: var(--purple); letter-spacing: 0.32em; text-transform: uppercase; }
 
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 16px;
-    line-height: 1.6;
-    -webkit-font-smoothing: antialiased;
-  }
+/* ---- feature strip ---- */
+.strip { background: #07070E; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.strip .wrap { display: grid; grid-template-columns: repeat(4, 1fr); }
+.feat { display: flex; align-items: center; gap: 16px; padding: 18px 30px; border-left: 1px solid var(--line); }
+.feat:first-child { border-left: 0; }
+.feat svg { width: 30px; height: 30px; stroke: var(--blue); fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; filter: drop-shadow(0 0 6px rgba(63, 211, 255, 0.35)); }
+.feat span { font-size: 9px; font-weight: 600; letter-spacing: 0.22em; text-transform: uppercase; color: var(--muted); line-height: 1.7; }
 
-  a { color: inherit; }
+/* ---- sections ---- */
+.sec { padding: 26px 70px 22px; border-top: 1px solid var(--line); }
+.sec:first-of-type { border-top: 0; }
+.label { display: flex; align-items: center; gap: 12px; font-size: 10px; font-weight: 700; color: var(--orange); letter-spacing: 0.28em; text-transform: uppercase; }
+.label::after { content: ""; width: 44px; height: 1px; background: var(--orange); }
+.h2 { font-size: 34px; font-weight: 300; letter-spacing: 0.18em; text-transform: uppercase; line-height: 1.15; margin-top: 8px; white-space: nowrap; }
 
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 28px; }
+.about { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: start; }
+.quote { border-left: 2px solid var(--purple); padding-left: 22px; margin-top: 20px; font-size: 12px; font-weight: 500; color: var(--purple); letter-spacing: 0.32em; text-transform: uppercase; line-height: 1.9; }
+.quote::after { content: ""; display: block; width: 40px; height: 2px; background: var(--purple); margin-top: 12px; }
+.about p { font-size: 14px; color: var(--ink); margin-bottom: 10px; line-height: 1.5; }
 
-  /* ---- nav ---- */
-  nav {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 22px 0; border-bottom: 1px solid var(--line);
-    position: sticky; top: 0; background: rgba(0,0,0,.88);
-    backdrop-filter: blur(12px); z-index: 20;
-  }
-  .brand { display: flex; align-items: center; gap: 11px; text-decoration: none; }
-  .brand svg { display: block; }
-  .brand-name {
-    font-weight: 800; letter-spacing: .16em; font-size: 14px;
-    color: var(--accent-soft);
-  }
-  .nav-links { display: flex; align-items: center; gap: 28px; }
-  .nav-links a {
-    color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500;
-    transition: color .15s;
-  }
-  .nav-links a:hover { color: var(--text); }
+.row5 { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 16px; }
+.row5 > * { padding: 4px 12px; border-left: 1px solid var(--line); text-align: center; }
+.row5 > *:first-child { border-left: 0; }
 
-  /* ---- hero ---- */
-  header { padding: 96px 0 76px; }
-  .eyebrow {
-    font-family: var(--mono); font-size: 12px; letter-spacing: .14em;
-    text-transform: uppercase; color: var(--accent); margin: 0 0 22px;
-  }
-  h1 {
-    font-size: clamp(38px, 6vw, 62px); line-height: 1.05; letter-spacing: -.03em;
-    font-weight: 800; margin: 0 0 24px; max-width: 15ch;
-  }
-  .lede {
-    font-size: 19px; color: var(--muted); max-width: 60ch; margin: 0 0 38px;
-  }
-  .lede strong { color: var(--text); font-weight: 600; }
+.proto .badge { display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 20px; font-weight: 700; letter-spacing: 0.04em; }
+.proto .badge svg { width: 30px; height: 30px; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.proto .name { margin-top: 12px; font-size: 9px; font-weight: 600; letter-spacing: 0.22em; text-transform: uppercase; color: var(--muted); line-height: 1.8; }
+.mcp { color: var(--orange); } .mcp svg { stroke: var(--orange); }
+.a2a { color: var(--violet); } .a2a svg { stroke: var(--violet); }
+.h402 { color: var(--blue); } .h402 svg { stroke: var(--blue); }
+.usdc { color: var(--green); } .usdc svg { stroke: var(--green); }
+.base { color: var(--violet); } .base svg { stroke: var(--violet); }
+.subtext { text-align: center; color: var(--ink); font-size: 14px; margin-top: 22px; }
 
-  .cta-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
-  .btn {
-    font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
-    border-radius: 8px; padding: 13px 22px; border: 1px solid transparent;
-    transition: opacity .15s, border-color .15s, background .15s; text-decoration: none;
-    display: inline-block;
-  }
-  .btn-primary { background: var(--text); color: #000; }
-  .btn-primary:hover { opacity: .88; }
-  /* Border needs to be clearly visible on pure black -- at --line-bright the
-     ghost button read as unstyled text rather than a button. */
-  .btn-ghost { background: transparent; color: var(--text); border-color: #43434a; }
-  .btn-ghost:hover { border-color: var(--accent); color: var(--accent-soft); }
-  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.uc { display: flex; align-items: center; gap: 12px; text-align: left; padding: 6px 12px; }
+.uc svg { width: 30px; height: 30px; stroke: var(--ink); fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.uc span { font-size: 9px; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); line-height: 1.8; white-space: nowrap; }
 
-  /* ---- sections ---- */
-  section { padding: 76px 0; border-top: 1px solid var(--line); }
-  h2 {
-    font-size: 13px; font-family: var(--mono); letter-spacing: .14em;
-    text-transform: uppercase; color: var(--dim); font-weight: 500; margin: 0 0 34px;
-  }
-  h3 { font-size: 17px; font-weight: 600; margin: 0 0 8px; letter-spacing: -.01em; }
-  .section-lead {
-    font-size: 24px; font-weight: 700; letter-spacing: -.02em;
-    margin: 0 0 16px; max-width: 30ch;
-  }
+.res { display: flex; align-items: center; gap: 10px; text-align: left; padding: 6px 10px; }
+.res svg { width: 24px; height: 24px; stroke: var(--ink); fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.res .t { font-size: 9px; font-weight: 700; letter-spacing: 0.12em; white-space: nowrap; text-transform: uppercase; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: #3A3A48; }
+.res .d { font-size: 10px; color: var(--muted); margin-top: 3px; }
+.res:hover .t { color: var(--orange); }
 
-  /* ---- protocol / proof ---- */
-  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: start; }
-  .steps { list-style: none; padding: 0; margin: 0; counter-reset: step; }
-  .steps li {
-    counter-increment: step; position: relative; padding-left: 40px;
-    margin-bottom: 26px; color: var(--muted); font-size: 15px;
-  }
-  .steps li::before {
-    content: counter(step); position: absolute; left: 0; top: 0;
-    width: 24px; height: 24px; border-radius: 50%;
-    border: 1px solid var(--line-bright); color: var(--accent);
-    font-family: var(--mono); font-size: 11px;
-    display: grid; place-items: center;
-  }
-  .steps b { color: var(--text); font-weight: 600; display: block; margin-bottom: 3px; }
+.cta { margin: 4px 70px 28px; border: 1px solid var(--line); border-radius: 8px; padding: 24px 40px; display: flex; align-items: center; justify-content: space-between; background: #050509; }
+.cta-l { display: flex; align-items: center; gap: 24px; }
+.cta-l svg { width: 46px; height: 46px; stroke: var(--orange); fill: none; stroke-width: 1.6; }
+.cta h3 { font-size: 20px; font-weight: 700; letter-spacing: 0.02em; }
+.cta p { font-size: 14px; color: var(--muted); margin-top: 4px; }
+.cta-r { display: flex; align-items: center; gap: 28px; }
+.cta-r .pill { padding: 14px 32px; font-size: 11px; }
+.cta-r .or { font-size: 10px; letter-spacing: 0.2em; color: var(--muted); }
+.cta-r .explore { font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; text-decoration: underline; text-underline-offset: 6px; text-decoration-color: #3A3A48; }
 
-  .code-window {
-    background: var(--surface); border: 1px solid var(--line);
-    border-radius: 10px; overflow: hidden;
-  }
-  .code-head {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 11px 16px; border-bottom: 1px solid var(--line);
-    font-family: var(--mono); font-size: 11px; color: var(--dim);
-    letter-spacing: .06em;
-  }
-  .code-body {
-    margin: 0; padding: 18px; font-family: var(--mono); font-size: 12.5px;
-    line-height: 1.75; color: var(--muted); overflow-x: auto;
-  }
-  .k { color: var(--accent-soft); }
-  .s { color: var(--accent); }
-  .n { color: #7dd3fc; }
-  .c { color: var(--muted); font-style: italic; }
+.foot { border-top: 1px solid var(--line); padding: 30px 70px; display: grid; grid-template-columns: 1.25fr 0.85fr 1.5fr 0.7fr; align-items: center; gap: 16px; }
+.foot .brand img { height: 60px; }
+.foot .brand-name { font-size: 20px; }
+.foot .brand-sub2 { font-size: 10px; color: var(--muted); margin-top: 2px; white-space: nowrap; }
+.foot .small { font-size: 10px; font-weight: 500; color: var(--purple); letter-spacing: 0.28em; text-transform: uppercase; line-height: 1.9; text-align: center; }
+.foot .mail { display: flex; align-items: center; gap: 12px; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; justify-content: center; white-space: nowrap; }
+.foot .mail svg { width: 26px; height: 26px; stroke: var(--purple); fill: none; stroke-width: 1.6; }
+.foot .copy { font-size: 11px; color: var(--dim); text-align: right; line-height: 1.8; }
 
-  .copy-btn {
-    background: transparent; border: 1px solid var(--line-bright); color: var(--muted);
-    font-family: var(--mono); font-size: 11px; padding: 4px 10px; border-radius: 5px;
-    cursor: pointer;
-  }
-  .copy-btn:hover { color: var(--text); border-color: var(--muted); }
-
-  /* ---- audit grid ---- */
-  .audits { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-  .audit { background: var(--bg); padding: 26px 24px; }
-  .audit p { margin: 0; color: var(--muted); font-size: 14.5px; }
-  .audit .route { font-family: var(--mono); font-size: 12px; color: var(--dim); margin-top: 12px; }
-
-  /* ---- pricing ---- */
-  .price-hero {
-    border: 1px solid var(--line-bright); border-radius: 12px;
-    padding: 40px; background: var(--surface); margin-bottom: 20px;
-  }
-  .price-tag {
-    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 18px;
-  }
-  .price-num { font-size: 52px; font-weight: 800; letter-spacing: -.03em; line-height: 1; }
-  .price-unit { color: var(--muted); font-size: 16px; }
-  .price-list { list-style: none; padding: 0; margin: 22px 0 0; }
-  .price-list li {
-    padding: 11px 0; border-top: 1px solid var(--line); color: var(--muted);
-    font-size: 14.5px; display: flex; justify-content: space-between; gap: 18px;
-  }
-  .price-list li span:last-child { font-family: var(--mono); color: var(--text); white-space: nowrap; }
-
-  /* ---- guarantees ---- */
-  .guarantees { list-style: none; padding: 0; margin: 0; display: grid; gap: 18px; }
-  .guarantees li { display: flex; gap: 13px; color: var(--muted); font-size: 15px; }
-  .guarantees .mark { color: var(--accent); flex-shrink: 0; font-weight: 700; }
-  .guarantees b { color: var(--text); font-weight: 600; }
-
-  /* ---- discovery links ---- */
-  .endpoints { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
-  .endpoint {
-    display: flex; justify-content: space-between; align-items: center; gap: 14px;
-    border: 1px solid var(--line); border-radius: 8px; padding: 13px 16px;
-    text-decoration: none; transition: border-color .15s;
-  }
-  .endpoint:hover { border-color: var(--line-bright); }
-  .endpoint code { font-family: var(--mono); font-size: 13px; color: var(--text); }
-  .endpoint span { font-size: 13px; color: var(--dim); text-align: right; }
-
-  footer {
-    border-top: 1px solid var(--line); padding: 40px 0 60px;
-    color: var(--dim); font-size: 13.5px;
-  }
-  footer a { color: var(--muted); }
-  .footnote { color: var(--dim); font-size: 13px; margin-top: 14px; max-width: 68ch; }
-
-  @media (max-width: 860px) {
-    .split, .audits, .endpoints { grid-template-columns: 1fr; }
-    .split { gap: 40px; }
-    .nav-links { gap: 18px; }
-    .nav-links a.hide-sm { display: none; }
-    header { padding: 64px 0 52px; }
-    section { padding: 56px 0; }
-    .price-hero { padding: 28px; }
-  }
 </style>
 </head>
 <body>
 
-<div class="wrap">
-  <nav>
-    <a class="brand" href="/" aria-label="HubVibe home">
-      <svg width="30" height="30" viewBox="0 0 100 100" aria-hidden="true">
-        <defs>
-          <filter id="g" x="-60%" y="-60%" width="220%" height="220%">
-            <feGaussianBlur stdDeviation="3" result="b"/>
-            <feFlood flood-color="#FF8A2A" flood-opacity=".9"/>
-            <feComposite in2="b" operator="in" result="gc"/>
-            <feMerge><feMergeNode in="gc"/><feMergeNode in="gc"/><feMergeNode in="SourceGraphic"/></feMerge>
-          </filter>
-        </defs>
-        <g fill="#FDE4CE" filter="url(#g)">
-          <rect x="9" y="22" width="10" height="56" rx="1"/>
-          <rect x="34" y="22" width="10" height="56" rx="1"/>
-          <rect x="9" y="45" width="35" height="10" rx="1"/>
-          <polygon points="50,22 61,22 70.5,57 80,22 91,22 77,78 64,78"/>
-        </g>
-      </svg>
-      <span class="brand-name">HUBVIBE</span>
+<!-- HERO: the owner's artwork (mascot, Earth, wordmark). Nothing is drawn or typed over the mascot. -->
+<section class="hero">
+  <img class="hero-art" src="/hero.jpg" width="1024" height="460" alt="HubVibe">
+  <header class="nav">
+    <a class="brand" href="/">
+      <img src="/logo-hv.png" alt="HV">
+      <span><span class="brand-name">HubVibe</span><br><span class="brand-sub">Machine Economy Infrastructure</span></span>
     </a>
-    <div class="nav-links">
-      <a href="#protocol" class="hide-sm">Protocol</a>
-      <a href="#capabilities">Capabilities</a>
-      <a href="#audits">Audits</a>
-      <a href="#pricing">Pricing</a>
-      <a href="/docs">API</a>
-    </div>
-  </nav>
-
-  <header>
-    <p class="eyebrow">Machine-economy infrastructure</p>
-    <h1>Services your software can buy on its own.</h1>
-    <p class="lede">
-      HubVibe is a gateway where autonomous agents discover, use and pay for
-      machine services — compliance audits, AI inference, search and
-      extraction, on-chain and market data, media, compute. An agent calls an
-      endpoint, gets an HTTP 402 with the price and how to pay, settles it,
-      and receives a result — <strong>no account, no sales call, no human in
-      the loop</strong>.
-    </p>
-    <div class="cta-row">
-      <a class="btn btn-primary" href="/.well-known/agent.json">Read the machine manifest</a>
-      <a class="btn btn-ghost" href="#pricing">See pricing</a>
-    </div>
+    <nav class="links">
+      <a href="#about">About</a>
+      <a href="#technology">Technology</a>
+      <a href="/.well-known/agent.json">Pricing</a>
+      <a href="#resources">Docs</a>
+      <a href="mailto:hubvibe@hubvibe-io.com">Contact</a>
+      <a class="pill" href="https://github.com/Its-fortunatefolly/HubVibe">Get started &rarr;</a>
+    </nav>
   </header>
+  <div class="side l">Software<br>moves<br>the world.</div>
+  <div class="side r">Machines<br>transact<br>a brighter<br>tomorrow.</div>
+  <div class="tagline">
+    <h1>Infrastructure for the machine economy.</h1>
+    <p>Agents &nbsp;&bull;&nbsp; APIs &nbsp;&bull;&nbsp; Payments &nbsp;&bull;&nbsp; Real work</p>
+  </div>
+</section>
 
-  <section id="protocol">
-    <h2>How a machine buys</h2>
-    <div class="split">
-      <div>
-        <p class="section-lead">Payment is part of the request, not a signup flow.</p>
-        <ol class="steps">
-          <li><b>Call the endpoint</b>Unauthenticated. Nothing to register first.</li>
-          <li><b>Read the 402</b>The response carries the exact price and every payment rail that can actually settle on this node.</li>
-          <li><b>Pay and retry</b>Over whichever rails are live for this deployment -- the 402 tells you. The audit runs and the result comes back on the same call.</li>
-        </ol>
-      </div>
-      <div class="code-window">
-        <div class="code-head"><span>HTTP 402 — POST /audit/wcag</span></div>
-<pre class="code-body">{
-  <span class="k">"error"</span>: <span class="s">"payment_required"</span>,
-  <span class="k">"price_usd"</span>: <span class="n">0.05</span>,
-  <span class="k">"accepts"</span>: [
-    <span class="c">// every rail this node can settle,</span>
-    <span class="c">// each in its own protocol's shape</span>
-  ],
-  <span class="k">"other_rails"</span>: [],
-  <span class="k">"docs"</span>: <span class="s">"/.well-known/agent.json"</span>
-}</pre>
-      </div>
+<!-- FEATURE STRIP -->
+<section class="strip"><div class="wrap">
+  <div class="feat"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z"/></svg><span>Machine-payable<br>services</span></div>
+  <div class="feat"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>Autonomous<br>workflows</span></div>
+  <div class="feat"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg><span>Open protocols<br>real transactions</span></div>
+  <div class="feat"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M12 7.5V12m0 0-5.2 4.8M12 12l5.2 4.8"/></svg><span>Build a brighter<br>tomorrow</span></div>
+</div></section>
+
+<div class="wrap">
+
+<!-- ABOUT -->
+<section id="about" class="sec">
+  <div class="label">About</div>
+  <div class="about">
+    <div>
+      <h2 class="h2">About HubVibe</h2>
+      <div class="quote">A quieter<br>internet<br>does<br>more.</div>
     </div>
-  </section>
-
-  <section id="capabilities">
-    <h2>What agents can buy here</h2>
-    <p class="section-lead">One gateway, one payment flow, a growing repertoire of machine services.</p>
-    <div class="audits">
-      <div class="audit">
-        <h3>AI models</h3>
-        <p>LLM inference across Gemini and Claude (via Vertex Model Garden), with provider and model choice — the exact model that ran comes back with measured token usage.</p>
-        <div class="route">POST /work/llm/analyze · /work/llm/extract · /work/llm/generate</div>
-      </div>
-      <div class="audit">
-        <h3>Search &amp; research</h3>
-        <p>Grounded web search, guarded page fetch, structured extraction — and composite research jobs that return one cited answer, on a page, a question, or a company.</p>
-        <div class="route">POST /work/search/web · /work/research/web · /work/research/company</div>
-      </div>
-      <div class="audit">
-        <h3>Compute &amp; data</h3>
-        <p>BigQuery queries, plain-language questions, forecasting and anomaly detection against a dataset, plus code execution in Google's own hosted sandbox.</p>
-        <div class="route">POST /work/data/query · /work/data/forecast · /work/code/execute</div>
-      </div>
-      <div class="audit">
-        <h3>Blockchain</h3>
-        <p>Read-only JSON-RPC against Base mainnet: balances, blocks, transactions, receipts, logs, contract calls. No broadcasting, by design.</p>
-        <div class="route">POST /work/chain/address · /work/chain/transaction · /work/chain/rpc</div>
-      </div>
-      <div class="audit">
-        <h3>Market intelligence</h3>
-        <p>Live spot prices, exchange-rate tables and tickers from public Coinbase data — plus prediction-market questions, prices and volumes.</p>
-        <div class="route">POST /work/market/intel · /work/market/quote · /work/market/prediction</div>
-      </div>
-      <div class="audit">
-        <h3>Media</h3>
-        <p>Image generation (Imagen), voice synthesis and transcription (Cloud Speech), delivered in the response itself — the only channel a per-call payer needs.</p>
-        <div class="route">POST /work/image/generate · /work/speech/synthesize</div>
-      </div>
-      <div class="audit">
-        <h3>Site audits</h3>
-        <p>The original product: deterministic accessibility, SEO, security-header and performance checks against the live page.</p>
-        <div class="route">POST /audit/*</div>
-      </div>
-      <div class="audit">
-        <h3>Agent network</h3>
-        <p>MCP · A2A · HTTP 402 · USDC · BASE. Discovery via the agent manifest, a live MCP endpoint, and payment challenges that carry the catalog.</p>
-        <div class="route">POST /mcp · GET /.well-known/agent.json</div>
-      </div>
+    <div>
+      <p>HubVibe builds infrastructure for a world where software can discover services, communicate with other systems, and transact autonomously.</p>
+      <p>We&rsquo;re building for the emerging machine economy &mdash; where agents and applications can act on behalf of people and organizations, complete real work, and pay per use without requiring a human to stand between every transaction.</p>
+      <p>Our focus is simple: make machine-to-machine interaction reliable, programmable, and economically useful.</p>
     </div>
-    <p class="footnote">
-      Which capabilities are live on a given node is deployment state, not a
-      promise: the <a href="/.well-known/agent.json">agent manifest</a> lists
-      exactly what this node sells right now, and <a href="/work">/work</a>
-      indexes the worker network for free, including why anything unavailable
-      is off. A capability without a configured provider is omitted, never
-      advertised broken.
-    </p>
-  </section>
+  </div>
+</section>
 
-  <section id="audits">
-    <h2>The audit suite</h2>
-    <p class="section-lead">Four dimensions. Run one, or run all four in a single billed call.</p>
-    <div class="audits">
-      <div class="audit">
-        <h3>Accessibility</h3>
-        <p>WCAG 2.1 A/AA via axe-core, executed against the rendered page in a real browser.</p>
-        <div class="route">POST /audit/wcag</div>
-      </div>
-      <div class="audit">
-        <h3>SEO</h3>
-        <p>Title, meta description, H1 structure, canonical, OpenGraph, structured data, lang attribute.</p>
-        <div class="route">POST /audit/seo</div>
-      </div>
-      <div class="audit">
-        <h3>Security headers</h3>
-        <p>HTTPS, HSTS, CSP, X-Content-Type-Options, clickjacking protection, Referrer-Policy, CORS.</p>
-        <div class="route">POST /audit/security</div>
-      </div>
-      <div class="audit">
-        <h3>Performance</h3>
-        <p>DOM node count, transferred bytes, and request count measured from one real page load.</p>
-        <div class="route">POST /audit/performance</div>
-      </div>
-    </div>
-    <p class="footnote">
-      Narrow, disclosed signals — not a substitute for a full manual accessibility
-      audit, a penetration test, or a Lighthouse run. A check that cannot run
-      returns an error and is never reported as a pass.
-    </p>
-  </section>
+<!-- TECHNOLOGY -->
+<section id="technology" class="sec">
+  <div class="label">Technology</div>
+  <h2 class="h2">Built for the agentic internet</h2>
+  <div class="row5 proto">
+    <div class="mcp"><div class="badge"><svg viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5z"/><path d="M3 7l9 5 9-5M12 12v10"/></svg>MCP</div><div class="name">Model context<br>protocol</div></div>
+    <div class="a2a"><div class="badge"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>A2A</div><div class="name">Agent-to-agent<br>commerce</div></div>
+    <div class="h402"><div class="badge"><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m9 9-3 3 3 3m6-6 3 3-3 3"/></svg>HTTP 402</div><div class="name">Payment native<br>APIs</div></div>
+    <div class="usdc"><div class="badge"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v12M15 9a3 3 0 0 0-3-2c-1.7 0-3 .9-3 2s1.3 2 3 2 3 .9 3 2-1.3 2-3 2a3 3 0 0 1-3-2"/></svg>USDC</div><div class="name">Stable payments<br>onchain</div></div>
+    <div class="base"><div class="badge"><svg viewBox="0 0 24 24"><path d="M12 2l8.7 5v10L12 22l-8.7-5V7L12 2z"/><path d="M12 7.5l4.3 2.5v5L12 17.5 7.7 15v-5L12 7.5z"/></svg>BASE</div><div class="name">Built for<br>the open economy</div></div>
+  </div>
+  <p class="subtext">HubVibe operates at the intersection of autonomous agents, open protocols, APIs, and machine payments.</p>
+</section>
 
-  <section id="pricing">
-    <h2>Pricing</h2>
-    <div class="price-hero">
-      <div class="price-tag">
-        <span class="price-num">Metered</span>
-        <span class="price-unit">per call · settled machine-to-machine</span>
-      </div>
-      <p class="lede" style="margin:0;font-size:16px;max-width:52ch;">
-        Agents pay for exactly the audits they run. No minimum, no
-        commitment, no account. The live rate for every route is published
-        in the agent manifest and quoted in the 402 challenge itself, so a
-        caller reads the price from the endpoint rather than from a page
-        that could drift.
-      </p>
-      <ul class="price-list">
-        <li><span>Rates</span><span><a href="/.well-known/agent.json">/.well-known/agent.json</a></span></li>
-        <li><span>Payment</span><span>HTTP 402 &middot; <a href="/.well-known/agent.json">live rails</a></span></li>
-      </ul>
-    </div>
+<!-- USE CASES -->
+<section id="use-cases" class="sec">
+  <div class="label">Use cases</div>
+  <div class="row5">
+    <div class="uc"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m21 21-5.5-5.5"/></svg><span>Audits<br>&amp; data</span></div>
+    <div class="uc"><svg viewBox="0 0 24 24"><path d="M4 20V14M10 20V9M16 20V4M22 20H2"/></svg><span>Analysis<br>&amp; insights</span></div>
+    <div class="uc"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg><span>Compute<br>&amp; automation</span></div>
+    <div class="uc"><svg viewBox="0 0 24 24"><path d="m3 21 12-12m0 0 3 3-12 12-3-3 12-12zM17 3v3M19.5 5.5h-3M21 9v2"/></svg><span>Content<br>&amp; transformation</span></div>
+    <div class="uc"><svg viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5z"/><path d="M3 7l9 5 9-5M12 12v10"/></svg><span>And more<br>via agents</span></div>
+  </div>
+</section>
 
-  </section>
+<!-- RESOURCES -->
+<section id="resources" class="sec">
+  <div class="label">Resources</div>
+  <div class="row5">
+    <a class="res" href="https://github.com/Its-fortunatefolly/HubVibe"><svg viewBox="0 0 24 24"><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/></svg><span><span class="t">GitHub &rarr;</span><br><span class="d">Source code</span></span></a>
+    <a class="res" href="/.well-known/agent.json"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/><path d="M14 2v6h6M8 13h8M8 17h8M8 9h2"/></svg><span><span class="t">Agent manifest &rarr;</span><br><span class="d">Machine readable</span></span></a>
+    <a class="res" href="https://github.com/Its-fortunatefolly/HubVibe#readme"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><span><span class="t">Documentation &rarr;</span><br><span class="d">Setup &amp; integration</span></span></a>
+    <a class="res" href="/openapi.json"><svg viewBox="0 0 24 24"><path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5a2 2 0 0 0 2 2h1M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1"/></svg><span><span class="t">OpenAPI &rarr;</span><br><span class="d">API reference</span></span></a>
+    <a class="res" href="/mcp.json"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span><span class="t">MCP registry &rarr;</span><br><span class="d">Discover services</span></span></a>
+  </div>
+</section>
 
-  <section id="guarantees">
-    <h2>What we guarantee</h2>
-    <ul class="guarantees">
-      <li><span class="mark">→</span><span><b>You are charged only for a result.</b> If an audit cannot run — the target is unreachable, or it times out — the call returns an error and the payment is never settled.</span></li>
-      <li><span class="mark">→</span><span><b>A check that fails to run is never a pass.</b> Results are rule-based and reproducible. Nothing here asks a language model whether a page looks compliant.</span></li>
-      <li><span class="mark">→</span><span><b>We advertise only rails that work.</b> The 402 lists payment methods this node can actually settle, so an agent never builds a payment that cannot land.</span></li>
-      <li><span class="mark">→</span><span><b>Rate limits cost nothing.</b> A throttled request is rejected before any payment is touched and returns a Retry-After.</span></li>
-    </ul>
-  </section>
+<!-- CTA -->
+<section class="cta">
+  <div class="cta-l">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/></svg>
+    <div><h3>READY TO BUILD?</h3><p>Plug into the machine economy today.</p></div>
+  </div>
+  <div class="cta-r">
+    <a class="pill" href="https://github.com/Its-fortunatefolly/HubVibe">Get started &rarr;</a>
+    <span class="or">OR</span>
+    <a class="explore" href="https://github.com/Its-fortunatefolly/HubVibe#readme">Explore docs</a>
+  </div>
+</section>
 
-  <section id="start">
-    <h2>Call it</h2>
-    <div class="split">
-      <div>
-        <p class="section-lead">One request. Works from anything that speaks HTTP.</p>
-        <p style="color:var(--muted);font-size:15px;max-width:46ch;">
-          Start unauthenticated: the call returns the 402 above, carrying the
-          price and the rails this node can settle. Settle one and repeat the
-          same request with the header that rail names — or let a client
-          library do both in one call.
-        </p>
-        <div class="endpoints" style="margin-top:26px;grid-template-columns:1fr;">
-          <a class="endpoint" href="/.well-known/agent.json"><code>/.well-known/agent.json</code><span>Agent manifest</span></a>
-          <a class="endpoint" href="/openapi.json"><code>/openapi.json</code><span>OpenAPI spec</span></a>
-          <a class="endpoint" href="/mcp.json"><code>/mcp.json</code><span>MCP tools</span></a>
-          <a class="endpoint" href="/llms.txt"><code>/llms.txt</code><span>Plain-text summary</span></a>
-        </div>
-      </div>
-      <div class="code-window">
-        <div class="code-head">
-          <span>curl</span>
-          <button class="copy-btn" id="copy-curl-button">Copy</button>
-        </div>
-<pre class="code-body" id="curl-example">curl -X POST https://hubvibe-io.com/audit/bundle \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com"}'
-# -> 402 with the price and the payable rails.
-# Settle one, then repeat this call carrying the
-# payment header that rail's entry names.</pre>
-      </div>
-    </div>
-  </section>
+<!-- FOOTER -->
+<footer class="foot">
+  <div class="brand"><img src="/logo-hv.png" alt="HV"><span><span class="brand-name">HubVibe</span><br><span class="brand-sub2">Infrastructure for the machine economy.</span></span></div>
+  <div class="small">Small actions<br>big worlds.</div>
+  <a class="mail" href="mailto:hubvibe@hubvibe-io.com"><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 7 10-7"/></svg>HUBVIBE@HUBVIBE-IO.COM</a>
+  <div class="copy">&copy; 2026 HubVibe<br>v1.4.1</div>
+</footer>
 
-  <footer>
-    <div class="brand" style="margin-bottom:14px;">
-      <svg width="20" height="20" viewBox="0 0 100 100" aria-hidden="true">
-        <g fill="#8d8d94">
-          <rect x="9" y="22" width="10" height="56" rx="1"/>
-          <rect x="34" y="22" width="10" height="56" rx="1"/>
-          <rect x="9" y="45" width="35" height="10" rx="1"/>
-          <polygon points="50,22 61,22 70.5,57 80,22 91,22 77,78 64,78"/>
-        </g>
-      </svg>
-      <span class="brand-name" style="color:var(--dim);">HUBVIBE</span>
-    </div>
-    HubVibe — machine-payable services for autonomous agents.
-    <a href="/docs">API reference</a> ·
-    <a href="/.well-known/agent.json">Agent manifest</a> ·
-    <a href="https://github.com/its-fortunatefolly/hubvibe" target="_blank" rel="noopener">Source</a>
-  </footer>
 </div>
-
-<script>
-document.getElementById("copy-curl-button").addEventListener("click", async () => {
-  const button = document.getElementById("copy-curl-button");
-  const text = document.getElementById("curl-example").textContent;
-  try {
-    await navigator.clipboard.writeText(text);
-    button.textContent = "Copied";
-  } catch (err) {
-    button.textContent = "Select to copy";
-  }
-  setTimeout(() => { button.textContent = "Copy"; }, 2000);
-});
-</script>
 </body>
 </html>

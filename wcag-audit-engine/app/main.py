@@ -1743,6 +1743,18 @@ async def og_image():
     return FileResponse(STATIC_DIR / "og-image.png", media_type="image/png")
 
 
+@app.get("/hero.jpg", response_class=FileResponse, include_in_schema=False)
+async def hero_image():
+    # Landing-page artwork (robot mascot over Earth), cut from the owner's design.
+    return FileResponse(STATIC_DIR / "hero.jpg", media_type="image/jpeg")
+
+
+@app.get("/logo-hv.png", response_class=FileResponse, include_in_schema=False)
+async def logo_hv():
+    # The owner's glowing HV mark, used in the landing page header and footer.
+    return FileResponse(STATIC_DIR / "logo-hv.png", media_type="image/png")
+
+
 @app.get("/robots.txt", response_class=FileResponse, tags=["discovery"])
 async def robots_txt():
     return FileResponse(STATIC_DIR / "robots.txt", media_type="text/plain")
