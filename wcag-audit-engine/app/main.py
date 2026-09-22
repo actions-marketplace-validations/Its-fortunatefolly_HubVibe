@@ -2746,6 +2746,39 @@ async def _validation_error(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=400, content=_jsonrpc_error(None, code, message))
 
 
+@app.exception_handler(Exception)
+async def _unhandled_error(request: Request, exc: Exception):
+    """The last boundary: an exception nothing else caught still answers in
+    machine-readable JSON, never Starlette's text/plain "Internal Server
+    Error".
+
+    The worker routes catch everything themselves (workers/router.py) and
+    /mcp shapes its own errors, so in practice this is for the audit routes
+    and the discovery surfaces. A crawler or a buying agent that gets a
+    text body cannot tell a crashed node from a blocked one; a JSON body
+    with `billed: false` says exactly what happened and that nothing was
+    charged. The status stays 500 -- it IS a server fault -- and the
+    exception is logged with its traceback so it is fixed, not hidden.
+    """
+    logging.getLogger(__name__).exception(
+        "unhandled %s on %s %s", type(exc).__name__, request.method, request.url.path
+    )
+    if request.url.path == "/mcp":
+        return JSONResponse(
+            status_code=500,
+            content=_jsonrpc_error(None, -32603, f"Internal error: {type(exc).__name__}"),
+        )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "status": "error",
+            "reason": "internal_error",
+            "detail": f"{type(exc).__name__}: the node hit an unexpected fault serving this request.",
+            "billed": False,
+        },
+    )
+
+
 @app.post("/mcp", tags=["discovery"])
 async def mcp_streamable_http(
     payload: Any = Body(...),
