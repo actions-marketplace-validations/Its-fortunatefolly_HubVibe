@@ -1,13 +1,15 @@
 # HubVibe
 
-**Machine-payable services for autonomous agents.** The core product is the
-site compliance audit suite — WCAG 2.1 A/AA, SEO, security headers, and
-performance, deterministic rules against the real rendered page — and beside
-it a worker network (`/work/*`): LLM inference, web search and extraction,
-read-only blockchain RPC, market and prediction-market data, BigQuery
-analysis and forecasting, media generation, sandboxed code execution, maps,
-and composite research jobs. Everything is priced per call and payable by
-software with no account and no human in the loop.
+**One node, 42 machine-payable jobs, one price per call, one receipt per job.**
+HubVibe sells work to autonomous agents over HTTP 402: 37 workers under
+`/work/*` — LLM inference, live web search and page extraction, Base chain
+reads, spot and prediction-market data, BigQuery analysis and forecasting,
+image/speech/video generation, sandboxed Python, maps, and cited research,
+verification and company briefs that compose several of them in one call —
+plus 5 deterministic site audits (WCAG 2.1 A/AA, SEO, security headers,
+performance, bundle). Pay with x402 (USDC on Base) or an MPP transfer-hash
+credential. No account, no human in the loop, and every delivered job has a
+machine-verifiable receipt at `/work/receipts/{id}`.
 
 Live: **https://hubvibe-io.com**
 
@@ -153,10 +155,9 @@ Body is `{"url": "..."}`; `wcag` and `seo` also accept raw `{"html": "..."}`.
 The same payment gate sells a wider catalog beside the audits — each worker
 validated for free before any payment is read, never billed for a call that
 produced no result, with per-provider retries, exponential backoff, failover
-and a circuit breaker behind it. Keyless workers (chain, market, prediction,
-fetch, extract) are live on any deployment with outbound HTTPS; Google-backed
-workers light up once the box's own credentials resolve; a few need one more
-operator step (noted below) and stay off, with a specific reason, until then.
+and a circuit breaker behind it. All 37 are live on the public node at hubvibe-io.com (`GET /work` lists
+them, free). On any other deployment a worker whose provider is not
+configured is absent, with a specific reason, until it is.
 
 | Worker | Price | Capability |
 |---|---|---|
@@ -178,8 +179,8 @@ operator step (noted below) and stay off, with a specific reason, until then.
 | `research.web` / `verify.claims` / `security.mcp_inspect` | $5.00 | Web-search brief with citations; claims-vs-sources fact check; MCP endpoint audit |
 | `research.company` | $10.00 | Company research brief from live web sources, cited |
 | `monitor.snapshot` / `monitor.check` | $0.50 | Baseline a page, then get a diff summary later |
-| `maps.places` / `maps.route` / `maps.weather` | $0.10 | Google's managed Maps Grounding Lite MCP server — needs `MAPS_GROUNDING_LITE_API_KEY` |
-| `video.generate` | $10.00 | Veo — needs `WORKER_VEO_ENABLED=1`, set once the operator confirms the model resolves on the project |
+| `maps.places` / `maps.route` / `maps.weather` | $0.10 | Google's managed Maps Grounding Lite MCP server |
+| `video.generate` | $10.00 | Veo, 4-second clip |
 
 **A worker whose provider is not configured is absent** — no route, no
 price, no tool, no manifest entry — the same rule the payment rails follow.
@@ -193,22 +194,26 @@ return the first delivery instead of buying the work twice.
 
 ## Paying
 
-Three rails, all fail-closed — no valid credential means no audit runs:
+Three rails, all fail-closed — no valid credential means no job runs:
 
-- **`X-API-Key`** — prepaid key, bought with the MPP top-up rail where it is live
-- **`X-PAYMENT`** — x402
-- **`Authorization: Payment ...`** — MPP (Stripe Shared Payment Tokens for
-  fiat, or Tempo for crypto)
+- **`X-PAYMENT` / `PAYMENT-SIGNATURE`** — x402 v2, `exact` scheme, USDC on
+  Base, settled through the Coinbase facilitator. This is the primary rail.
+- **`Authorization: Payment ...`** — MPP `evm` method, `hash` credential: the
+  payer sends the exact USDC amount to the recipient itself and presents the
+  transaction hash. No signature is verified, so smart-wallet payers (Coinbase
+  Base Account and other EIP-7702 / ERC-4337 wallets that x402 facilitators
+  reject) can buy through this rail. It is advertised in every 402 under
+  `other_rails` and in the `WWW-Authenticate: Payment` challenge.
+- **`X-API-Key`** — prepaid key; in the code, not enabled on the public node.
 
-Which are live is deployment-specific. Read `accepts` in any 402, or
-`payment.methods` in the agent manifest — both list only what actually works.
-On the public node at hubvibe-io.com, x402 is the live rail; the prepaid-key
-and MPP rails are in the code but not enabled there (`other_rails` is empty
-in its 402).
+Read `accepts` and `other_rails` in any 402, or `payment` in the agent
+manifest — both list only what actually settles on that deployment. Workers
+priced above $1 carry a `buyer_note`: x402 client libraries cap a payment at
+$1 by default and the buyer must raise the cap to purchase them.
 
 ### What you are charged for
 
-Only an audit that produced a result.
+Only a job that produced a result.
 
 - An audit that could not run returns **502** with `billed: false` and is
   never settled. x402 payments are *verified* to grant access but only
@@ -222,8 +227,14 @@ Only an audit that produced a result.
   `PAYMENT-RESPONSE` header (`X-PAYMENT-RESPONSE` for v1 clients), exactly
   as the x402 spec describes. The x402 client libraries decode it; the
   bundled `hubvibe_tollbooth.py` keeps it as `last_settlement`.
-- One signed payment buys one audit. A replayed x402 authorization is
+- One signed payment buys one job. A replayed x402 authorization is
   refused with a 402 before it reaches the facilitator.
+- Every `/work` call, paid or refused, has a receipt at
+  `GET /work/receipts/{receipt_id}` (the id is returned on the response):
+  outcome (`paid_delivered`, `paid_failed`, `unpaid_refused`, ...), rail,
+  network, asset, amount, payer, transaction hash, sha256 hashes of the
+  canonical request and result, provider provenance and node version. A
+  buyer can verify what it paid for without trusting this node's counters.
 
 ### What this service will not fetch
 

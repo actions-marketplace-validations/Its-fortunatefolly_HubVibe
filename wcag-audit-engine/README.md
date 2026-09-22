@@ -1,6 +1,7 @@
-# HubVibe Site Compliance Auditing Suite
+# HubVibe node — audit engine and worker network
 
-A metered A2A service with five real, rule-based audit endpoints:
+This is the service behind hubvibe-io.com: the 37-worker `/work` catalog
+(see `app/workers/`) and five real, rule-based audit endpoints:
 **accessibility** (WCAG 2.1 A/AA via
 [axe-core](https://github.com/dequelabs/axe-core)/
 [axe-playwright-python](https://pypi.org/project/axe-playwright-python/)),
