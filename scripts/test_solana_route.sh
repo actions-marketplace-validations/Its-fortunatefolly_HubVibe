@@ -76,6 +76,10 @@ RPC = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 ATOMIC_PER_USD = 1_000_000
 BODY = {"url": "https://example.com", "question": "What is this page for?"}
+if os.environ.get("BODY_JSON"):
+    # Another route, another body: e.g. ROUTE=/work/llm/generate
+    # BODY_JSON='{"prompt": "Say hello"}' EXPECT_PRICE_USD=0.25
+    BODY = json.loads(os.environ["BODY_JSON"])
 UA = "hubvibe-solana-route-test/1.0"
 
 
@@ -190,7 +194,7 @@ with httpx.Client(timeout=240, headers={"User-Agent": UA}) as s:
         step("SIGN-ONLY complete: payload printed, NOT sent (blockhash expires in ~1 minute)")
         sys.exit(0)
 
-    step("Sending the paid request (this spends 5.00 USDC on Solana)")
+    step(f"Sending the paid request (this spends {EXPECT_PRICE:.2f} USDC on Solana)")
     paid = s.post(url, json=BODY, headers=headers)
     print(f"  HTTP {paid.status_code}")
     hdr = paid.headers.get("PAYMENT-RESPONSE") or paid.headers.get("X-PAYMENT-RESPONSE") or ""

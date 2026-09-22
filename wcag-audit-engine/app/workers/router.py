@@ -162,7 +162,20 @@ def _payer_of(auth) -> Optional[str]:
         payload = getattr(pending, "payload", None)
         inner = getattr(payload, "payload", None) or {}
         authorization = inner.get("authorization") or {}
-        return authorization.get("from") or None
+        payer = authorization.get("from") or None
+    except Exception:
+        payer = None
+    if payer:
+        return payer
+    # No authorization block. A Solana (SVM) payload carries a signed
+    # transaction, not an EIP-3009 authorization, so the payer is named only
+    # by the facilitator -- on its settle response. Found live 2026-09-22:
+    # the first Solana-settled call (tx prRhBh3n...) was recorded with no
+    # payer and, because `settled` hung off the payer, as not settled, and
+    # its receipt told the buyer they had not been charged.
+    try:
+        result = getattr(pending, "settle_result", None)
+        return getattr(result, "payer", None) or None
     except Exception:
         return None
 
@@ -414,17 +427,25 @@ def _make_handler(worker):
 
         delivered = _deliver(content, auth)
         facts = _payment_facts_of(auth)
+        # Re-read the payer AFTER settlement: a Solana payment names its payer
+        # only in the facilitator's settle response, which did not exist when
+        # the call was opened. An EVM payer, known from the start, is unchanged.
+        payer = _payer_of(auth) or payer
+        settle_state = getattr(getattr(auth, "pending_payment", None), "settle_state", None)
 
         # _deliver returns the payable 402 instead when the facilitator
         # REFUSED to settle. Nothing was earned, so nothing is stored under
         # the idempotency key and the ledger says refused.
         refused = getattr(delivered, "status_code", 200) == 402
+        # Settled means the facilitator settled: its own verdict first, the
+        # payer's presence second (MPP hash payments carry no settle_state).
+        settled = not refused and (settle_state == "settled" or payer is not None)
         ledger.close_call(
             call_id, "refused" if refused else "ok",
             latency_ms=ctx.provenance()["elapsed_ms"],
             provider_used=",".join(ctx.providers_used) or None,
             providers_tried=",".join(ctx.providers_used) or None,
-            attempts=len(ctx.attempts), settled=not refused and payer is not None,
+            attempts=len(ctx.attempts), settled=settled,
             tx_hash=_tx_of(auth) or facts["tx_hash"], payer=payer,
             result_hash=ledger.canonical_hash(result),
             network=facts["network"], asset=facts["asset"],
