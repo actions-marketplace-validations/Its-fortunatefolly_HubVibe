@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Its-fortunatefolly/hubvibe",
-  "title": "HubVibe: machine-payable site audits + 37-capability worker network",
+  "title": "HubVibe: 37 Machine-Payable Dev Utilities and WCAG Audits",
   "description": "Pay per call via HTTP 402: 5 deterministic site audits as MCP tools, 37 /work jobs, receipt per job.",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "icons": [
     {
       "src": "https://hubvibe-io.com/favicon.svg",

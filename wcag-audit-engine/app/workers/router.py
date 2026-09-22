@@ -447,7 +447,19 @@ def register_routes() -> None:
         router.add_api_route(
             worker.path, _make_handler(worker), methods=["POST"],
             name=worker.tool_name, tags=["workers"], summary=worker.title,
-            description=f"{worker.description} ${worker.price_usd:.2f} per call.")
+            description=f"{worker.description} ${worker.price_usd:.2f} per call.",
+            # The 200 contract, in openapi.json: the envelope with this
+            # worker's own result schema, and an example generated from it.
+            # Without this every /work route documented its response as `{}`.
+            responses={
+                200: {
+                    "description": f"Delivered result of {worker.name}; a receipt is at receipt_url.",
+                    "content": {"application/json": {
+                        "schema": catalog.response_schema(worker),
+                        "example": catalog.response_example(worker),
+                    }},
+                },
+            })
 
 
 register_routes()
@@ -473,6 +485,7 @@ async def work_index():
                 "description": worker.description,
                 "tags": worker.tags,
                 "input_schema": worker.input_schema,
+                "output_schema": worker.output_schema,
                 "returns": worker.returns,
                 "max_seconds": worker.max_seconds,
                 "pricing_basis": worker.pricing_basis,
@@ -483,6 +496,7 @@ async def work_index():
             for worker in live
         ],
         "count": len(live),
+        "response_envelope": catalog.contract.RESPONSE_ENVELOPE,
         "spend_cap": (
             f"x402 client libraries cap a single payment at ${catalog.SPEND_CAP_USD:.2f} "
             "by default. Workers priced above that carry a buyer_note saying how to "

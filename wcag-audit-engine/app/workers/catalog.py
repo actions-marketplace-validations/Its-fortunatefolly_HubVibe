@@ -19,6 +19,19 @@ exceeds 240s.
 
 from typing import Optional
 
+try:
+    from . import contract
+except ImportError:
+    # Loaded by file path rather than as part of the workers package (the
+    # seed script's tests do this): load the sibling the same way.
+    import importlib.util as _ilu
+    from pathlib import Path as _Path
+
+    _spec = _ilu.spec_from_file_location(
+        "wcag_audit_engine_workers_contract", _Path(__file__).resolve().parent / "contract.py")
+    contract = _ilu.module_from_spec(_spec)  # type: ignore
+    _spec.loader.exec_module(contract)
+
 # The ceiling every worker deadline must respect, from the live 402 challenge.
 PAYMENT_WINDOW_SECONDS = 300
 MAX_WORKER_SECONDS = 240
@@ -44,8 +57,8 @@ class Worker:
                  "max_seconds", "pricing_basis", "composes", "requires")
 
     def __init__(self, name, price_usd, tier, title, description, tags,
-                 input_schema, output_schema, returns, skill, max_seconds,
-                 pricing_basis, composes=(), requires=()):
+                 input_schema, returns, skill, max_seconds,
+                 pricing_basis, composes=(), requires=(), output_schema=None):
         self.name = name
         self.path = f"/work/{name.replace('.', '/')}"
         self.price_usd = price_usd
@@ -54,7 +67,13 @@ class Worker:
         self.description = description
         self.tags = list(tags)
         self.input_schema = input_schema
-        self.output_schema = output_schema
+        # The JSON Schema of `result` in this worker's 200 body, from
+        # workers/contract.py -- written from the skill's literal return
+        # value, and the object openapi.json, agent.json and the Bazaar record
+        # all publish. A worker with no entry there cannot be constructed,
+        # which is the guard: a route is never advertised with a placeholder.
+        self.output_schema = (output_schema if output_schema is not None
+                              else contract.OUTPUT_SCHEMAS[name])
         self.returns = returns
         self.skill = skill
         self.max_seconds = min(max_seconds, MAX_WORKER_SECONDS)
@@ -106,8 +125,6 @@ class Worker:
         return "work_" + self.name.replace(".", "_")
 
 
-_RESULT = {"type": "object", "description": "Worker result; see `returns`."}
-
 CATALOG = [
     # --- utilities: one live read, priced near cost -------------------------
     Worker(
@@ -118,7 +135,6 @@ CATALOG = [
             "Base RPC node. Use to check chain liveness or time an on-chain action."),
         tags=["base", "blockchain", "rpc", "gas", "network"],
         input_schema=_obj({}, []),
-        output_schema=_RESULT,
         returns="block_number, gas_price_wei, gas_price_gwei.",
         skill="chain.network", max_seconds=30,
         pricing_basis="Provisional. Provider cost is zero (public RPC); price covers infrastructure.",
@@ -134,7 +150,6 @@ CATALOG = [
         input_schema=_obj(
             {"address": {"type": "string", "description": "0x-prefixed Base address."}},
             ["address"]),
-        output_schema=_RESULT,
         returns="balance_wei, balance_eth, transaction_count, is_contract, code_size_bytes.",
         skill="chain.address", max_seconds=45,
         pricing_basis="Provisional. Provider cost zero (public RPC); three reads per call.",
@@ -149,7 +164,6 @@ CATALOG = [
         input_schema=_obj(
             {"hash": {"type": "string", "description": "0x-prefixed transaction hash."}},
             ["hash"]),
-        output_schema=_RESULT,
         returns="from, to, value_eth, block_number, status, gas_used, log_count.",
         skill="chain.transaction", max_seconds=45,
         pricing_basis="Provisional. Provider cost zero (public RPC).",
@@ -164,7 +178,6 @@ CATALOG = [
         input_schema=_obj(
             {"product_id": {"type": "string", "description": "e.g. BTC-USD."}},
             ["product_id"]),
-        output_schema=_RESULT,
         returns="price, price_change_24h_pct, volume_24h, base/quote currency.",
         skill="market.quote", max_seconds=30,
         pricing_basis="Provisional. Provider cost zero (public endpoint).",
@@ -181,7 +194,6 @@ CATALOG = [
             "query": {"type": "string", "description": "Topic to match (optional)."},
             "limit": {"type": "integer", "description": "1-50, default 10."},
         }, []),
-        output_schema=_RESULT,
         returns="markets[] with question, implied_probabilities[], volume, end_date.",
         skill="market.prediction", max_seconds=30,
         pricing_basis="Provisional. Provider cost zero (public API).",
@@ -194,7 +206,7 @@ CATALOG = [
             "links, rendered in a real browser so JavaScript-built pages extract "
             "correctly. Falls back to direct fetch when rendering is unavailable."),
         tags=["extract", "scrape", "web", "content", "browser"],
-        input_schema=_URL, output_schema=_RESULT,
+        input_schema=_URL,
         returns="title, description, text, text_chars, links[], javascript_rendered.",
         skill="extract.page", max_seconds=90,
         pricing_basis="Provisional. Runs on our own flat-rate browser; marginal provider cost zero.",
@@ -213,7 +225,6 @@ CATALOG = [
             "text": {"type": "string", "description": "Material to analyse."},
             "question": {"type": "string", "description": "What to answer. Optional."},
         }, ["text"]),
-        output_schema=_RESULT,
         returns="answer, model, tokens{prompt,output}.",
         skill="llm.analyze", max_seconds=150,
         pricing_basis="Provisional. Token usage is measured per call; set GEMINI_PRICE_PER_MTOK_IN/_OUT to measure cost.",
@@ -231,7 +242,6 @@ CATALOG = [
             "fields": {"type": "array", "items": {"type": "string"},
                        "description": "Field names to extract."},
         }, ["text", "fields"]),
-        output_schema=_RESULT,
         returns="fields{} with one key per requested field.",
         skill="llm.extract", max_seconds=150,
         pricing_basis="Provisional. Token usage measured per call.",
@@ -251,7 +261,6 @@ CATALOG = [
             "sql": {"type": "string", "description": "Read-only SELECT or WITH query."},
             "max_scan_gib": {"type": "number", "description": "Optional scan ceiling."},
         }, ["sql"]),
-        output_schema=_RESULT,
         returns="columns[], rows[], row_count, gib_processed, cache_hit.",
         skill="data.query", max_seconds=180,
         pricing_basis="Provisional. Bytes scanned measured per call; set BQ_PRICE_PER_TIB to measure cost.",
@@ -272,7 +281,6 @@ CATALOG = [
             "columns": {"type": "array", "items": {"type": "string"},
                         "description": "Optional column hints."},
         }, ["question", "table"]),
-        output_schema=_RESULT,
         returns="answer, sql, columns[], rows[], gib_processed.",
         skill="data.question", max_seconds=240,
         pricing_basis="Provisional, completed-work tier. Three provider calls; usage measured per call.",
@@ -293,7 +301,6 @@ CATALOG = [
             "url": {"type": "string"},
             "question": {"type": "string", "description": "Optional; defaults to an overview."},
         }, ["url"]),
-        output_schema=_RESULT,
         returns="brief, title, final_url, source{}, model.",
         skill="research.brief", max_seconds=200,
         pricing_basis="Provisional, completed-work tier. Two provider calls; usage measured per call.",
@@ -312,7 +319,6 @@ CATALOG = [
             "url": {"type": "string"},
             "fields": {"type": "array", "items": {"type": "string"}},
         }, ["url", "fields"]),
-        output_schema=_RESULT,
         returns="fields{} with one key per requested field, plus title and final_url.",
         skill="research.page_facts", max_seconds=200,
         pricing_basis="Provisional, completed-work tier. Two provider calls; usage measured per call.",
@@ -332,7 +338,6 @@ CATALOG = [
             "question": {"type": "string", "description": "Optional analysis question."},
             "limit": {"type": "integer"},
         }, []),
-        output_schema=_RESULT,
         returns="spot{}, prediction_markets[], analysis, disclaimer.",
         skill="market.intel", max_seconds=200,
         pricing_basis="Provisional, completed-work tier. Three provider calls; usage measured per call.",
@@ -347,7 +352,6 @@ CATALOG = [
             "sources it used. Grounded, not the model's own memory."),
         tags=["search", "web", "google", "grounding", "current"],
         input_schema=_obj({"query": {"type": "string"}}, ["query"]),
-        output_schema=_RESULT,
         returns="query, answer, sources[{url,title}], search_queries_used[], model.",
         skill="search.web", max_seconds=60,
         pricing_basis="Provisional. Token usage measured; Google's own search-grounding surcharge is not yet measured here.",
@@ -370,7 +374,6 @@ CATALOG = [
             "provider": {"type": "string", "description": "Optional: gemini or anthropic."},
             "model": {"type": "string", "description": "Optional: a specific model from that provider."},
         }, ["prompt"]),
-        output_schema=_RESULT,
         returns="text, model, provider, finish_reason, usage{input_tokens,output_tokens}.",
         skill="llm.generate", max_seconds=120,
         pricing_basis="Provisional. Token usage measured per call.",
@@ -383,7 +386,6 @@ CATALOG = [
             "its output, and the outcome back. Not run in this service's own infrastructure."),
         tags=["code", "execute", "sandbox", "python", "compute"],
         input_schema=_obj({"code": {"type": "string"}}, ["code"]),
-        output_schema=_RESULT,
         returns="code, output, outcome, summary, model.",
         skill="code.execute", max_seconds=90,
         pricing_basis="Provisional. Token usage measured per call.",
@@ -400,7 +402,6 @@ CATALOG = [
             "aspect_ratio": {"type": "string",
                              "description": "1:1, 3:4, 4:3, 16:9 or 9:16. Default 1:1."},
         }, ["prompt"]),
-        output_schema=_RESULT,
         returns="prompt, aspect_ratio, image_base64, mime_type, model.",
         skill="image.generate", max_seconds=100,
         pricing_basis="Provisional. Flat per-image rate; one attempt only (a retry would re-bill the vendor).",
@@ -414,7 +415,6 @@ CATALOG = [
             "text": {"type": "string"},
             "voice": {"type": "string", "description": "e.g. en-US-Standard-C. Optional."},
         }, ["text"]),
-        output_schema=_RESULT,
         returns="text_chars, voice, audio_base64, mime_type.",
         skill="speech.synthesize", max_seconds=60,
         pricing_basis="Provisional. Priced per character by voice tier; one attempt only.",
@@ -432,7 +432,6 @@ CATALOG = [
                              "description": "Base64-encoded audio, any common format."},
             "language_code": {"type": "string", "description": "BCP-47, default en-US."},
         }, ["audio_base64"]),
-        output_schema=_RESULT,
         returns="transcript, language_code, confidence, model.",
         skill="speech.transcribe", max_seconds=75,
         pricing_basis="Provisional. Cost per minute not yet measured (duration is not reported by the sync API).",
@@ -454,7 +453,6 @@ CATALOG = [
                        "description": "Optional: forecast multiple series at once."},
             "max_scan_gib": {"type": "number"},
         }, ["table", "timestamp_col", "data_col"]),
-        output_schema=_RESULT,
         returns="table, timestamp_col, data_col, horizon, columns[], rows[], row_count, gib_processed.",
         skill="data.forecast", max_seconds=200,
         pricing_basis="Provisional, completed-work tier. Bytes scanned measured per call.",
@@ -478,7 +476,6 @@ CATALOG = [
                        "description": "Optional: one series per value of these columns."},
             "max_scan_gib": {"type": "number"},
         }, ["history_table", "target_table", "timestamp_col", "data_col"]),
-        output_schema=_RESULT,
         returns="history_table, target_table, timestamp_col, data_col, anomaly_prob_threshold, columns[], rows[], row_count, gib_processed.",
         skill="data.anomalies", max_seconds=200,
         pricing_basis="Provisional, completed-work tier. Bytes scanned measured per call.",
@@ -495,7 +492,6 @@ CATALOG = [
             "claims": {"type": "array", "items": {"type": "string"}},
             "sources": {"type": "array", "items": {"type": "string"}},
         }, ["claims", "sources"]),
-        output_schema=_RESULT,
         returns="claims[], verdicts[{claim,verdict,quote,source_n}], sources_read[], sources_unread[], model.",
         skill="verify.claims", max_seconds=200,
         pricing_basis="Provisional, completed-work tier. Up to five provider calls; usage measured per call.",
@@ -512,7 +508,6 @@ CATALOG = [
             "question": {"type": "string"},
             "max_sources": {"type": "integer", "description": "1-4, default 3."},
         }, ["question"]),
-        output_schema=_RESULT,
         returns="question, answer, sources[{n,url,title}], partial[], model.",
         skill="research.web", max_seconds=220,
         pricing_basis="Provisional, completed-work tier. Up to five provider calls; usage measured per call.",
@@ -530,7 +525,6 @@ CATALOG = [
             "company": {"type": "string"},
             "max_sources": {"type": "integer", "description": "1-4, default 4."},
         }, ["company"]),
-        output_schema=_RESULT,
         returns="company, report, sources[{n,url,title}], partial[], model.",
         skill="research.company", max_seconds=220,
         pricing_basis="Provisional, completed-work tier. Up to six provider calls; usage measured per call.",
@@ -543,7 +537,7 @@ CATALOG = [
             "Fetch a page and save it as the baseline for monitor.check. Call this "
             "once, then monitor.check later to see what changed."),
         tags=["monitor", "baseline", "change-detection", "web"],
-        input_schema=_URL, output_schema=_RESULT,
+        input_schema=_URL,
         returns="url, title, text_chars, content_hash, note.",
         skill="monitor.snapshot", max_seconds=90,
         pricing_basis="Provisional. Runs on our own flat-rate browser; marginal provider cost near zero.",
@@ -555,7 +549,7 @@ CATALOG = [
             "Re-fetch a page monitor.snapshot was called on, and get back whether it "
             "changed and a summary of what changed."),
         tags=["monitor", "change-detection", "diff", "web"],
-        input_schema=_URL, output_schema=_RESULT,
+        input_schema=_URL,
         returns="url, title, changed, baseline_age_seconds, change_summary, model.",
         skill="monitor.check", max_seconds=150,
         pricing_basis="Provisional. Browser fetch plus one inference call when something changed; usage measured.",
@@ -568,7 +562,7 @@ CATALOG = [
             "tools/list: whether it requires authentication, what protocol version "
             "it speaks, and which of its tools are not marked read-only."),
         tags=["security", "mcp", "audit", "inspect", "tools"],
-        input_schema=_URL, output_schema=_RESULT,
+        input_schema=_URL,
         returns="reachable, requires_auth, protocol_version, tool_count, tools[], tools_without_readonly_annotation[].",
         skill="security.mcp_inspect", max_seconds=45,
         pricing_basis="Provisional, completed-work tier. Two lightweight requests to the target; provider cost zero.",
@@ -582,7 +576,7 @@ CATALOG = [
             "headers, and body. Unlike extract.page, every status code is a result, "
             "not a failure -- a 404 or 500 from the target is delivered as one."),
         tags=["fetch", "http", "raw", "status", "headers"],
-        input_schema=_URL, output_schema=_RESULT,
+        input_schema=_URL,
         returns="url, final_url, status, content_type, bytes, text, truncated, headers{}.",
         skill="fetch.raw", max_seconds=60,
         pricing_basis="Provisional. Provider cost zero (public HTTP).",
@@ -600,7 +594,6 @@ CATALOG = [
             "method": {"type": "string", "description": "e.g. eth_call, eth_getLogs."},
             "params": {"type": "array", "description": "JSON-RPC positional params. Default []."},
         }, ["method"]),
-        output_schema=_RESULT,
         returns="method, result or error, endpoint.",
         skill="chain.rpc", max_seconds=30,
         pricing_basis="Provisional. Provider cost zero (public RPC).",
@@ -614,7 +607,6 @@ CATALOG = [
         tags=["market", "rates", "currency", "exchange", "coinbase"],
         input_schema=_obj({"currency": {"type": "string", "description": "e.g. USD, ETH, BTC."}},
                           ["currency"]),
-        output_schema=_RESULT,
         returns="currency, rates{}.",
         skill="market.rates", max_seconds=20,
         pricing_basis="Provisional. Provider cost zero (public endpoint).",
@@ -629,7 +621,6 @@ CATALOG = [
         tags=["market", "ticker", "bid", "ask", "coinbase"],
         input_schema=_obj({"product_id": {"type": "string", "description": "e.g. BTC-USD."}},
                           ["product_id"]),
-        output_schema=_RESULT,
         returns="product_id, price, bid, ask, volume, time.",
         skill="market.ticker", max_seconds=20,
         pricing_basis="Provisional. Provider cost zero (public endpoint).",
@@ -644,7 +635,6 @@ CATALOG = [
         input_schema=_obj({"slug": {"type": "string",
                                     "description": "The market's Polymarket slug."}},
                           ["slug"]),
-        output_schema=_RESULT,
         returns="slug, market{question,implied_probabilities[],...}.",
         skill="prediction.market", max_seconds=20,
         pricing_basis="Provisional. Provider cost zero (public API).",
@@ -657,7 +647,6 @@ CATALOG = [
             "volume."),
         tags=["prediction", "polymarket", "events", "market", "odds"],
         input_schema=_obj({"limit": {"type": "integer", "description": "1-50, default 10."}}, []),
-        output_schema=_RESULT,
         returns="events[{id,title,slug,volume,end_date,market_count}], count.",
         skill="prediction.events", max_seconds=20,
         pricing_basis="Provisional. Provider cost zero (public API).",
@@ -676,7 +665,6 @@ CATALOG = [
             "query": {"type": "string", "description": "What to find, e.g. 'coffee near the Ferry Building'."},
             "region_code": {"type": "string", "description": "Optional ISO 3166-1 alpha-2 bias."},
         }, ["query"]),
-        output_schema=_RESULT,
         returns="query, result (places found, per Maps Grounding Lite's own shape).",
         skill="maps.places", max_seconds=40,
         pricing_basis="Provisional. Maps Grounding Lite's own billing is not yet measured here.",
@@ -693,7 +681,6 @@ CATALOG = [
             "destination": {"type": "string"},
             "travel_mode": {"type": "string", "description": "DRIVE, WALK, BICYCLE or TRANSIT. Default DRIVE."},
         }, ["origin", "destination"]),
-        output_schema=_RESULT,
         returns="origin, destination, travel_mode, result (route, per Maps Grounding Lite's own shape).",
         skill="maps.route", max_seconds=40,
         pricing_basis="Provisional. Maps Grounding Lite's own billing is not yet measured here.",
@@ -706,7 +693,6 @@ CATALOG = [
             "Maps Grounding Lite MCP server."),
         tags=["maps", "weather", "forecast", "google", "geospatial"],
         input_schema=_obj({"location": {"type": "string"}}, ["location"]),
-        output_schema=_RESULT,
         returns="location, result (weather, per Maps Grounding Lite's own shape).",
         skill="maps.weather", max_seconds=40,
         pricing_basis="Provisional. Maps Grounding Lite's own billing is not yet measured here.",
@@ -725,7 +711,6 @@ CATALOG = [
             "duration_seconds": {"type": "integer", "description": "4, 6 or 8. Default 6."},
             "generate_audio": {"type": "boolean", "description": "Default false."},
         }, ["prompt"]),
-        output_schema=_RESULT,
         returns="prompt, aspect_ratio, duration_seconds, video_base64 or gcs_uri, mime_type, model.",
         skill="video.generate", max_seconds=MAX_WORKER_SECONDS,
         pricing_basis="Provisional. Flat per-second rate once measured; one attempt only (a retry would re-bill the vendor).",
@@ -836,6 +821,21 @@ def buyer_note(worker: "Worker") -> Optional[str]:
         f"{{ maxAmountPerPayment: '${worker.price_usd:.2f}' }} }}). "
         "Coinbase's x402_pay tool takes max_amount per call instead."
     )
+
+
+def response_schema(worker: "Worker") -> dict:
+    """The full 200 schema of this worker's route (envelope + its result)."""
+    return contract.response_schema(worker)
+
+
+def response_example(worker: "Worker") -> dict:
+    """An example 200 body, generated from the schema so it cannot drift."""
+    return contract.response_example(worker)
+
+
+def output_example(worker: "Worker") -> dict:
+    """An example `result` for this worker, generated from its schema."""
+    return contract.output_example(worker)
 
 
 def description_of(path: str) -> Optional[str]:

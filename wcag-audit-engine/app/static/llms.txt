@@ -14,7 +14,10 @@ Base URL: https://hubvibe-io.com
 Machine-readable discovery:
 - /.well-known/agent.json -- full manifest: pricing, live payment rails,
   rate limits, per-endpoint examples
-- /openapi.json -- OpenAPI 3.1 spec for all routes
+- /openapi.json -- OpenAPI 3.1 spec for all routes, with a response schema
+  and example on every /work route
+- /.well-known/ard.json -- Agentic Resource Discovery manifest: one entry
+  per audit and per worker with capabilities and representative queries
 - /mcp -- live MCP endpoint (Streamable HTTP, JSON-RPC). Discovery via
   initialize/tools/list is free; tools/call is billed per call. It speaks
   the x402 MCP protocol: an unpaid tools/call returns isError with the v2

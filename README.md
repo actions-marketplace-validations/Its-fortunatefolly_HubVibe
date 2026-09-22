@@ -252,7 +252,8 @@ Agents shouldn't have to read documentation to use this:
 | | |
 |---|---|
 | [`/.well-known/agent.json`](https://hubvibe-io.com/.well-known/agent.json) | Full manifest — pricing, live rails, limits, per-endpoint examples |
-| [`/openapi.json`](https://hubvibe-io.com/openapi.json) | OpenAPI 3.1 |
+| [`/openapi.json`](https://hubvibe-io.com/openapi.json) | OpenAPI 3.1, response schema and example on every `/work` route |
+| [`/.well-known/ard.json`](https://hubvibe-io.com/.well-known/ard.json) | Agentic Resource Discovery manifest: one entry per worker and audit, with representative queries |
 | [`/mcp.json`](https://hubvibe-io.com/mcp.json) | MCP tool definitions |
 | [`/llms.txt`](https://hubvibe-io.com/llms.txt) | Plain-text summary |
 | [`/docs`](https://hubvibe-io.com/docs) | Interactive reference |

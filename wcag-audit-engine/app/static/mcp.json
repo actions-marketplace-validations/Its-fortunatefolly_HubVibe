@@ -1,8 +1,8 @@
 {
   "mcpVersion": "2025-06-18",
   "name": "hubvibe-site-audit",
-  "description": "Rule-based, verifiable site compliance audits -- accessibility (axe-core), SEO, security headers, and performance. Every result is a deterministic check against the actual page, never an LLM guess, and a check that couldn't run is never reported as a false pass.",
-  "version": "1.4.0",
+  "description": "HubVibe: 37 Machine-Payable Dev Utilities and WCAG Audits. This MCP server exposes the five deterministic site audits as tools (accessibility via axe-core, SEO, security headers, performance, and the bundle). The 37 /work utilities -- LLM inference, web search and extraction, Base chain reads, market and prediction-market data, BigQuery analysis and forecasting, image/speech/video generation, sandboxed Python, maps, cited research and verification -- are plain HTTP routes, priced per call and documented with request and response schemas in /openapi.json, /.well-known/agent.json and /.well-known/ard.json.",
+  "version": "1.4.1",
   "websiteUrl": "https://hubvibe-io.com/",
   "documentationUrl": "https://hubvibe-io.com/.well-known/agent.json",
   "repository": {

@@ -2,3 +2,4 @@ User-agent: *
 Allow: /
 
 Sitemap: https://hubvibe-io.com/sitemap.xml
+Agentmap: https://hubvibe-io.com/.well-known/ard.json

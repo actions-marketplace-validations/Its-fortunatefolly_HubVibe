@@ -691,6 +691,7 @@ def bazaar_extension_for_body(
     input_schema: dict,
     output_example: Optional[dict] = None,
     method: str = "POST",
+    output_schema: Optional[dict] = None,
 ) -> dict:
     """Bazaar discovery data for a JSON-body route, or {} when x402 is off.
 
@@ -728,7 +729,12 @@ def bazaar_extension_for_body(
             input=input_example,
             input_schema=input_schema,
             body_type="json",
-            output=OutputConfig(example=output_example) if output_example else None,
+            # The output half of the record: the example a shopping agent reads
+            # and, when the route publishes one, the JSON Schema of the 200 body
+            # -- the same object openapi.json serves, so the index cannot
+            # describe a response the route does not send.
+            output=(OutputConfig(example=output_example, schema=output_schema)
+                    if (output_example or output_schema) else None),
         )
         # setdefault, not assignment: if a future library version starts
         # emitting the method itself, the library's value wins rather than

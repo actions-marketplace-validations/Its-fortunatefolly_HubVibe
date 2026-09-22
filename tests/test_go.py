@@ -12,6 +12,7 @@ and a test that needs the real chain is a test that silently skips.
 """
 
 import os
+import site
 import subprocess
 import textwrap
 from pathlib import Path
@@ -64,12 +65,23 @@ def _fake_rpc(balances):
     return server, "http://127.0.0.1:%d" % server.server_address[1]
 
 
+def _python_path() -> str:
+    """HOME is moved in every test here so the script cannot find a real
+    wallet. That also moves python's user site, and on a box whose packages
+    were installed with `pip install --user` (Cloud Shell) the script's
+    python3 then cannot import eth_account. Hand it the site this test
+    process is using, so the test checks the script, not pip."""
+    parts = [site.getusersitepackages(), os.environ.get("PYTHONPATH", "")]
+    return os.pathsep.join(p for p in parts if p and os.path.isdir(p.split(os.pathsep)[0]))
+
+
 def _env(tmp_path, rpc, **extra):
     key_file = tmp_path / "key"
     key_file.write_text(KEY)
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(tmp_path),
+        "PYTHONPATH": _python_path(),
         "HUBVIBE_WALLET_FILE": str(key_file),
         "BASE_RPC": rpc,
         "POLL_SECONDS": "1",
@@ -231,6 +243,7 @@ def test_check_mode_answers_is_it_mine_and_where_is_the_money(tmp_path, monkeypa
         ["bash", str(SCRIPT), "--check"], capture_output=True, text=True,
         cwd=REPO_ROOT, timeout=180,
         env={"PATH": os.environ["PATH"], "HOME": str(tmp_path),
+             "PYTHONPATH": _python_path(),
              "HUBVIBE_WALLET_FILE": str(key),
              # An unreachable RPC: the balance may be unreadable, but the
              # address and the explanation must still come out.

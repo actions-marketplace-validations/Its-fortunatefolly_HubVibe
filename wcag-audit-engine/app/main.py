@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 try:
-    from . import audits, billing, browser_pool, mpp_payments, x402_payments
+    from . import ard, audits, billing, browser_pool, mpp_payments, x402_payments
 except ImportError:
     # Loaded directly by file path (e.g. by tooling/tests) rather than as
     # part of the `app` package -- fall back to loading each sibling module
@@ -52,6 +52,7 @@ except ImportError:
     billing = _load_sibling_module("billing")  # type: ignore
     mpp_payments = _load_sibling_module("mpp_payments")  # type: ignore
     x402_payments = _load_sibling_module("x402_payments")  # type: ignore
+    ard = _load_sibling_module("ard")  # type: ignore
 
 # The worker network: additional machine-payable capabilities that run BESIDE
 # the audits. Kept in its own import block so the audit imports above are
@@ -95,7 +96,7 @@ PUBLIC_BASE_URL = os.environ.get(
 # reading a version that names the wrong build. Kept in step with
 # server.json (the official registry's copy) by a test, since that file is
 # outside the container's build context and cannot be read at runtime.
-SERVICE_VERSION = "1.4.0"
+SERVICE_VERSION = "1.4.1"
 
 # The revenue counter in the log -- "x402 SETTLED ..." -- is an INFO line.
 # Python's root logger defaults to WARNING and uvicorn configures only its
@@ -133,15 +134,27 @@ async def _lifespan(_app: "FastAPI"):
     yield
 
 
+# The one name every discovery surface uses -- openapi.json, agent.json,
+# ard.json and (by hand, in the static files) mcp.json and the registry entry.
+# Crawlers scored this node as a five-tool audit service while it sold 37
+# more routes, because each surface carried its own audit-era title.
+SERVICE_TITLE = "HubVibe: 37 Machine-Payable Dev Utilities and WCAG Audits"
+
 app = FastAPI(
     lifespan=_lifespan,
-    title="HubVibe Site Compliance Auditing Suite",
+    title=SERVICE_TITLE,
     version=SERVICE_VERSION,
     description=(
-        "Machine-payable site compliance audits. Four deterministic audit "
-        "dimensions -- accessibility (axe-core), SEO, security headers, and "
-        "performance -- callable a la carte at $0.05/call or as a single "
-        "$0.15 bundle.\n\n"
+        "37 machine-payable dev utilities under /work -- LLM inference, web "
+        "search and page extraction, Base chain reads, market and "
+        "prediction-market data, BigQuery analysis and forecasting, "
+        "image/speech/video generation, sandboxed Python, maps, and cited "
+        "research, verification and company briefs that compose several of "
+        "them in one call -- plus five deterministic site audits: "
+        "accessibility (axe-core), SEO, security headers, performance, and "
+        "the $0.15 bundle, at $0.05 per single audit. Every /work route "
+        "declares its request schema and a typed 200 response schema with an "
+        "example; every delivered job has a receipt at /work/receipts/{id}.\n\n"
         "Built for agent-to-agent use: every paid route answers an "
         "unauthenticated request with HTTP 402 carrying a machine-readable "
         "payment challenge, so a paying agent can discover the price and "
@@ -151,8 +164,8 @@ app = FastAPI(
         "Every result is a rule-based check against the actual page. Nothing "
         "here is an LLM judging quality, and a check that could not run is "
         "reported as an error, never as a passing result.\n\n"
-        "Discovery: /.well-known/agent.json, /llms.txt, /mcp.json, "
-        "/openapi.json"
+        "Discovery: /.well-known/agent.json, /.well-known/ard.json, "
+        "/llms.txt, /mcp.json, /openapi.json"
     ),
     servers=[{"url": PUBLIC_BASE_URL, "description": "Production"}],
     openapi_tags=[
@@ -693,10 +706,15 @@ def _bazaar_extension_for_path(path: Optional[str]) -> dict:
         if workers is not None:
             worker = workers.catalog.get(path)
             if worker is not None:
+                # The output half used to be the placeholder {"status": "ok"}
+                # on all 37 routes -- the one field the Bazaar ranks on
+                # (completeness of the output schema) and the one an agent
+                # reads to decide whether the result fits its pipeline.
                 return x402_payments.bazaar_extension_for_body(
                     input_example=_worker_input_example(worker),
                     input_schema=worker.input_schema,
-                    output_example={"status": "ok"},
+                    output_example=workers.catalog.response_example(worker),
+                    output_schema=workers.catalog.response_schema(worker),
                 )
         return {}
     schema = (
@@ -1973,6 +1991,8 @@ def _openapi_with_payment_info() -> dict:
             "apiReference": "/docs",
             "homepage": "/",
             "llms": "/llms.txt",
+            "agent": "/.well-known/agent.json",
+            "ard": "/.well-known/ard.json",
         },
     }
     return doc
@@ -2039,21 +2059,49 @@ def _payment_methods_live() -> list:
     return methods
 
 
+@app.get("/.well-known/ard.json", tags=["discovery"])
+async def ard_manifest():
+    """Agentic Resource Discovery manifest (agenticresourcediscovery.org).
+
+    One entry per audit and per LIVE worker, plus the MCP server card, the
+    OpenAPI document and agent.json, each with the representative queries
+    and capability tokens a federated registry indexes on. Built from the
+    catalogs the routes charge from; see app/ard.py.
+    """
+    return ard.build_manifest(
+        base_url=PUBLIC_BASE_URL,
+        version=SERVICE_VERSION,
+        display_title=SERVICE_TITLE,
+        audits=_CATALOG,
+        audit_output_schemas=_MCP_OUTPUT_SCHEMAS,
+        audit_input_schema_for=lambda row: _schema_for(row["input"]),
+        mcp_tool_names=[tool["name"] for tool in _mcp_tools()],
+        workers_catalog=(workers.catalog if workers is not None and workers.is_configured() else None),
+        worker_contract=(workers.catalog.contract if workers is not None else None),
+    )
+
+
 @app.get("/.well-known/agent.json", tags=["discovery"])
 async def agent_manifest(request: Request):
     base = PUBLIC_BASE_URL
     live_methods = _payment_methods_live()
     return {
         "schema_version": "1.0",
-        "name": "HubVibe Site Compliance Auditing Suite",
+        "name": SERVICE_TITLE,
         "base_url": base,
         "description": (
-            "Rule-based, verifiable site audits -- accessibility (axe-core), "
-            "SEO, security headers, and performance -- callable a la carte "
-            "or as a single bundle. Every result is a deterministic check "
-            "against the actual page; nothing here is an LLM guessing at "
-            "quality, and a check that couldn't run is never reported as a "
-            "false pass."
+            "37 machine-payable dev utilities (the `workers` section: LLM "
+            "inference, web search and extraction, Base chain reads, market "
+            "and prediction-market data, BigQuery analysis and forecasting, "
+            "image/speech/video generation, sandboxed Python, maps, cited "
+            "research and verification) and five deterministic site audits "
+            "(the `endpoints` section: accessibility via axe-core, SEO, "
+            "security headers, performance, bundle). One price per call, "
+            "payable by software over HTTP 402 with no account. Every "
+            "capability carries its input and output JSON Schema here and in "
+            "/openapi.json; every delivered /work job has a receipt. The "
+            "audits are rule-based checks against the actual page; a check "
+            "that could not run is never reported as a pass."
         ),
         "pricing": {
             "model": "per-call",
@@ -2098,6 +2146,7 @@ async def agent_manifest(request: Request):
         },
         "discovery": {
             "openapi": f"{base}/openapi.json",
+            "ard": f"{base}/.well-known/ard.json",
             "mcp_endpoint": f"{base}/mcp",
             "mcp": f"{base}/mcp.json",
             "llms_txt": f"{base}/llms.txt",
@@ -2195,6 +2244,15 @@ def _worker_manifest_entries(live_methods: list) -> dict:
             "Send an Idempotency-Key header to make a retry safe: a repeated "
             "key returns the stored result and is not charged again."
         ),
+        # The 200 body every capability below returns: the envelope once,
+        # each capability's own `result` schema on its row.
+        "response_envelope": workers.catalog.contract.RESPONSE_ENVELOPE,
+        "receipts": (
+            f"Every delivered job's body carries receipt_id and receipt_url; "
+            f"GET {PUBLIC_BASE_URL}/work/receipts/{{receipt_id}} (free) returns "
+            "payer, pay_to, amount, asset, network, transaction hash, execution "
+            "status and sha256 hashes of the request and the delivered result."
+        ),
         "capabilities": [
             {
                 "path": worker.path,
@@ -2207,6 +2265,7 @@ def _worker_manifest_entries(live_methods: list) -> dict:
                 "description": worker.description,
                 "tags": worker.tags,
                 "input_schema": worker.input_schema,
+                "output_schema": worker.output_schema,
                 "returns": worker.returns,
                 "max_seconds": worker.max_seconds,
                 "composes": worker.composes,
