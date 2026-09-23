@@ -1,6 +1,6 @@
 # HubVibe node — audit engine and worker network
 
-This is the service behind hubvibe-io.com: the 37-worker `/work` catalog
+This is the service behind hubvibe-io.com: the 38-worker `/work` catalog
 (see `app/workers/`) and five real, rule-based audit endpoints:
 **accessibility** (WCAG 2.1 A/AA via
 [axe-core](https://github.com/dequelabs/axe-core)/

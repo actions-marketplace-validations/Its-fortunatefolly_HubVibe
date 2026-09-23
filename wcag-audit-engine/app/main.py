@@ -138,16 +138,17 @@ async def _lifespan(_app: "FastAPI"):
 # ard.json and (by hand, in the static files) mcp.json and the registry entry.
 # Crawlers scored this node as a five-tool audit service while it sold 37
 # more routes, because each surface carried its own audit-era title.
-SERVICE_TITLE = "HubVibe: 37 Machine-Payable Dev Utilities and WCAG Audits"
+SERVICE_TITLE = "HubVibe: 38 Machine-Payable Dev Utilities and WCAG Audits"
 
 app = FastAPI(
     lifespan=_lifespan,
     title=SERVICE_TITLE,
     version=SERVICE_VERSION,
     description=(
-        "37 machine-payable dev utilities under /work -- LLM inference, web "
+        "38 machine-payable dev utilities under /work -- LLM inference, web "
         "search and page extraction, Base chain reads, market and "
-        "prediction-market data, BigQuery analysis and forecasting, "
+        "prediction-market data, BigQuery analysis and forecasting, a "
+        "deterministic regression and probability engine, "
         "image/speech/video generation, sandboxed Python, maps, and cited "
         "research, verification and company briefs that compose several of "
         "them in one call -- plus five deterministic site audits: "
@@ -661,6 +662,11 @@ def _worker_input_example(worker) -> dict:
     request from, so the example has to satisfy the route's required fields --
     an example the route would 400 on is worse than none.
     """
+    if not worker.input_schema.get("required"):
+        # Nothing is required at the top level because the schema chooses
+        # between alternatives (oneOf); the catalog's own example is the
+        # body that satisfies it, and {} would not.
+        return dict(workers.catalog.example_for(worker))
     example = {}
     properties = worker.input_schema.get("properties") or {}
     for field in worker.input_schema.get("required") or []:
@@ -1694,7 +1700,16 @@ async def mcp_manifest():
 
     live_methods = _payment_methods_live()
     prices = {entry["path"]: entry["price_usd"] for entry in _CATALOG}
+    if workers is not None:
+        prices.update({w.path: w.price_usd for w in workers.catalog.CATALOG})
     live_tools = {tool["name"]: tool for tool in _mcp_tools()}
+    # A worker-backed tool this deployment cannot deliver is not listed,
+    # exactly as /work omits it: the static file names it, the live catalog
+    # decides whether it is for sale here.
+    manifest["tools"] = [
+        tool for tool in manifest.get("tools", [])
+        if tool.get("name") not in _MCP_WORKER_TOOLS or tool.get("name") in live_tools
+    ]
 
     # Absolute URLs in the static file are written against the production
     # host, because a crawler fetching the raw file out of the repo has no
@@ -2102,9 +2117,10 @@ async def agent_manifest(request: Request):
         "name": SERVICE_TITLE,
         "base_url": base,
         "description": (
-            "37 machine-payable dev utilities (the `workers` section: LLM "
+            "38 machine-payable dev utilities (the `workers` section: LLM "
             "inference, web search and extraction, Base chain reads, market "
             "and prediction-market data, BigQuery analysis and forecasting, "
+            "deterministic regression and probability statistics, "
             "image/speech/video generation, sandboxed Python, maps, cited "
             "research and verification) and five deterministic site audits "
             "(the `endpoints` section: accessibility via axe-core, SEO, "
@@ -2646,7 +2662,57 @@ def _mcp_tools() -> list:
                 "annotations": dict(_MCP_AUDIT_ANNOTATIONS, title=_MCP_TOOL_TITLES[path]),
             }
         )
+    for name, worker in _mcp_worker_tools().items():
+        tools.append(
+            {
+                "name": name,
+                "title": worker.title,
+                "description": (
+                    f"{worker.description} ${worker.price_usd:.2f} per call. "
+                    f"Returns: {worker.returns}"
+                ),
+                "inputSchema": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    **worker.input_schema,
+                },
+                # The route's whole 200 body: the same envelope openapi.json
+                # documents, with this worker's own result schema inside it.
+                "outputSchema": workers.catalog.response_schema(worker),
+                "annotations": dict(_MCP_AUDIT_ANNOTATIONS, title=worker.title),
+            }
+        )
     return tools
+
+
+# Worker-backed MCP tools: a /work catalog row sold under an MCP tool name.
+# One row, so the tool and the route cannot quote different prices or
+# schemas; tools/call hands the arguments to workers.router.serve, the same
+# function the HTTP route runs, so the job is gated, billed, receipted and
+# recorded once, the same way. Listed only while the worker is deliverable
+# here (same fail-closed rule as /work).
+_MCP_WORKER_TOOLS = {
+    "hubvibe_predictive_probability_engine": "stats.probability",
+}
+
+
+def _mcp_worker_tools() -> dict:
+    """{tool name: Worker} for the worker-backed tools this node can sell."""
+    if workers is None:
+        return {}
+    found = {}
+    for name, worker_name in _MCP_WORKER_TOOLS.items():
+        worker = workers.catalog.BY_NAME.get(worker_name)
+        if worker is not None and worker.available():
+            found[name] = worker
+    return found
+
+
+def _mcp_tool_example(name: str) -> dict:
+    """The example call the Bazaar record shows for a tool."""
+    worker = _mcp_worker_tools().get(name)
+    if worker is not None:
+        return workers.catalog.example_for(worker)
+    return {"url": "https://example.com"}
 
 
 _MCP_TOOL_PRICES = {
@@ -2847,8 +2913,9 @@ async def mcp_streamable_http(
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "hubvibe-site-audit", "version": SERVICE_VERSION},
                 "instructions": (
-                    "Rule-based site compliance audits. Every tool costs money and "
-                    "returns a deterministic result, never an LLM's opinion. Calls "
+                    "Rule-based site compliance audits and a deterministic "
+                    "statistics engine. Every tool costs money and returns a "
+                    "deterministic result, never an LLM's opinion. Calls "
                     "must be paid for; this deployment currently settles: "
                     f"{', '.join(_payment_methods_live()) or 'no rail is configured'}"
                     f" -- see {PUBLIC_BASE_URL}/.well-known/agent.json and the 402 "
@@ -2867,6 +2934,13 @@ async def mcp_streamable_http(
     if method == "tools/call":
         from starlette.concurrency import run_in_threadpool
 
+        if (params or {}).get("name") in _MCP_WORKER_TOOLS:
+            # A worker job runs on the event loop with its own limiter, like
+            # its HTTP route -- never in the audit thread pool, whose two
+            # slots on the box are what the browser audits wait on.
+            return await _mcp_worker_tool_call(
+                payload, request, x_api_key, x_payment, authorization
+            )
         return await run_in_threadpool(
             _mcp_tools_call, payload, request, x_api_key, x_payment, authorization
         )
@@ -3004,6 +3078,89 @@ def _mcp_tools_call(
     return _with_receipt(envelope, auth)
 
 
+async def _mcp_worker_tool_call(
+    payload: dict,
+    request: Request,
+    x_api_key: Optional[str],
+    x_payment: Optional[str],
+    authorization: Optional[str],
+):
+    """tools/call for a worker-backed tool: the route's own serve() with the
+    tool arguments as the body, and its answer re-shaped for JSON-RPC.
+
+    The route decides everything -- availability, pre-payment validation,
+    the gate, the run, billing, the receipt, the ledger row -- and this only
+    translates its HTTP outcome: 200 becomes a structured result, 402 the
+    v2 paywall the x402 MCP client pays, 429 the wait-and-retry result, and
+    every refusal or failure an isError result that says nothing was charged.
+    """
+    import json as _json
+
+    request_id = payload.get("id")
+    params = payload.get("params") or {}
+    name = params.get("name")
+    args = params.get("arguments") or {}
+    if not isinstance(args, dict):
+        return _jsonrpc_error(request_id, -32602, "Invalid params: `arguments` must be an object")
+
+    worker = _mcp_worker_tools().get(name)
+    if worker is None or not workers.is_configured():
+        return _mcp_tool_error(
+            request_id, f"{name} is not available on this deployment. Nothing was charged.",
+            {"billed": False},
+        )
+    price = worker.price_usd
+
+    # Same as the audit tools: the payment rides inside the JSON-RPC call.
+    meta_payment = x402_payments.payment_header_from_meta(
+        (params.get("_meta") or {}).get(x402_payments.MCP_PAYMENT_META_KEY)
+        if isinstance(params.get("_meta"), dict)
+        else None
+    )
+
+    sink: dict = {}
+    served = await workers.router.serve(
+        worker, args, request, x_api_key, x_payment or meta_payment, authorization,
+        sink=sink,
+    )
+    auth = sink.get("auth")
+    if isinstance(served, dict):
+        status, body = 200, served
+    else:
+        status = served.status_code
+        try:
+            body = _json.loads(bytes(served.body).decode())
+        except Exception:  # pragma: no cover - the route always writes JSON
+            body = {"status": "error", "detail": "unreadable response"}
+
+    if status == 200:
+        tool_result = {
+            "content": [{"type": "text", "text": _json.dumps(body, indent=2)}],
+            "structuredContent": body,
+            "isError": False,
+        }
+        receipt = x402_payments.receipt_meta(getattr(auth, "pending_payment", None))
+        if receipt:
+            tool_result["_meta"] = receipt
+        envelope = {"jsonrpc": "2.0", "id": request_id, "result": tool_result}
+        return _with_receipt(envelope, auth)
+    if status == 402:
+        return _mcp_payment_required(request_id, name, price, served)
+    if status == 429:
+        envelope = _mcp_tool_error(
+            request_id,
+            f"Rate limit exceeded ({RATE_LIMIT_PER_MINUTE} requests/minute). "
+            "Nothing was charged. Retry after 60 seconds.",
+            {"error": "rate_limited", "retry_after_seconds": 60, "billed": False},
+        )
+        return JSONResponse(content=envelope, headers={"Retry-After": "60"})
+    detail = body.get("detail") or f"{name} could not run."
+    details = {k: v for k, v in body.items() if k != "detail"}
+    details.setdefault("billed", False)
+    details["http_status"] = status
+    return _mcp_tool_error(request_id, f"{detail} Nothing was charged.", details)
+
+
 def _mcp_payment_required(request_id, name: str, price: float, err: JSONResponse) -> dict:
     """The MCP paywall, in the shape the x402 MCP client actually pays.
 
@@ -3054,7 +3211,7 @@ def _mcp_payment_required(request_id, name: str, price: float, err: JSONResponse
             tool_name=name,
             description=tool["description"],
             input_schema=tool["inputSchema"],
-            example={"url": "https://example.com"},
+            example=_mcp_tool_example(name),
         )
 
     # The REST body's `error` is "payment_required" on a fresh challenge and

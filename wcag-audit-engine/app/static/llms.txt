@@ -115,6 +115,9 @@ Standard (inference and data, $0.25-$0.50):
 - POST /work/llm/generate -- raw completion, your prompt and model choice
   (Gemini; Claude via Vertex Model Garden once enabled)
 - POST /work/code/execute -- run Python in Google's own hosted sandbox
+- POST /work/stats/probability -- deterministic linear regression, normal
+  distribution model and p-values over [x, y] points or two BigQuery columns
+  (also the MCP tool hubvibe_predictive_probability_engine)
 - POST /work/image/generate -- one image from a text prompt (Imagen 4)
 - POST /work/speech/synthesize -- text to speech (Cloud Text-to-Speech)
 - POST /work/speech/transcribe -- speech to text, up to 60s/10MB (STT v2)

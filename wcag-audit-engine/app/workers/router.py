@@ -43,7 +43,7 @@ from fastapi.responses import JSONResponse
 from . import catalog, ledger, runtime
 from .context import JobContext
 from .providers import health as provider_health
-from .skills import REGISTRY
+from .skills import PRECHECKS, REGISTRY
 
 log = logging.getLogger("hubvibe.workers.router")
 
@@ -288,178 +288,209 @@ def _make_handler(worker):
                 "status": "error", "reason": "invalid_request",
                 "detail": "Body must be a JSON object.", "billed": False})
 
-        skill = REGISTRY.get(worker.skill)
-        if skill is None:  # pragma: no cover
-            return JSONResponse(status_code=503, content={
-                "status": "error", "detail": f"{worker.name} is not implemented here."})
-
-        # Fail closed BEFORE the payment gate. A worker whose provider has no
-        # credential on this deployment cannot be delivered, so it must never
-        # quote a price -- taking money for a capability we cannot run is the
-        # worst outcome available here.
-        if not worker.available():
-            return JSONResponse(status_code=503, content={
-                "status": "error", "reason": "capability_unavailable", "billed": False,
-                "detail": (f"{worker.name} is not available on this deployment: "
-                           f"{worker.unavailable_reason()}"),
-            })
-
-        # Cheap input validation before the gate. The skills raise
-        # InvalidRequest from their own validators; run them dry by letting
-        # the job start only after payment, but catch the obvious shape errors
-        # here via the schema's required keys.
-        missing = [key for key in (worker.input_schema.get("required") or [])
-                   if key not in payload]
-        if missing:
-            return JSONResponse(status_code=400, content={
-                "status": "error", "reason": "invalid_request",
-                "detail": f"Missing required field(s): {', '.join(missing)}.",
-                "input_schema": worker.input_schema, "billed": False})
-
-        auth, err = await asyncio.get_running_loop().run_in_executor(
-            _executor, lambda: _authorize(
-                x_api_key, x_payment, authorization, request,
-                price_usd=worker.price_usd))
-        if err is not None:
-            return err
-
-        call_id = uuid.uuid4().hex
-        payer = _payer_of(auth)
-
-        # Duplicate protection. A "done" key returns the stored result and
-        # NEVER calls _bill -- so the second payment stays verified but
-        # unsettled, and no money moves. That is why no refund path is needed.
-        claimed = False
-        if idempotency_key:
-            state, stored = await asyncio.get_running_loop().run_in_executor(
-                _executor, lambda: ledger.claim_idempotency(
-                    idempotency_key, call_id, worker.name))
-            if state == "done":
-                try:
-                    content = json.loads(stored) if stored else {}
-                except json.JSONDecodeError:
-                    content = {}
-                content["idempotent_replay"] = True
-                content["billed"] = False
-                content["note"] = (
-                    "Returned the stored result for this Idempotency-Key. This "
-                    "request was not charged.")
-                return JSONResponse(status_code=200, content=content)
-            if state == "in_progress":
-                return JSONResponse(status_code=409, headers={"Retry-After": "5"}, content={
-                    "status": "error", "reason": "in_progress", "billed": False,
-                    "detail": ("A request with this Idempotency-Key is still running. "
-                               "Retry shortly to collect its result.")})
-            claimed = state == "claimed"
-
-        ledger.open_call(call_id=call_id, worker=worker.name, path=worker.path,
-                         price_usd=worker.price_usd, idempotency_key=idempotency_key,
-                         payer=payer, rail=_rail_of(auth),
-                         request_hash=ledger.canonical_hash(payload),
-                         node_version=_node_version)
-
-        try:
-            async with _semaphore:
-                result, ctx = await _run_job(worker, payload, call_id)
-        except runtime.WorkerError as exc:
-            _record_attempts(call_id, getattr(exc, "attempts", []))
-            ledger.close_call(call_id, "failed", failure_reason=exc.reason,
-                              failure_stage="execute", payer=payer)
-            if claimed and idempotency_key:
-                # The job failed and was not billed, so the caller is entitled
-                # to retry the same key.
-                ledger.release_idempotency(idempotency_key)
-            status = _error_status(exc.reason)
-            if status == 400:
-                # The caller's fault: nothing was billed, and _failed's 502
-                # wording would be wrong.
-                return JSONResponse(status_code=400, content={
-                    "status": "error", "reason": exc.reason, "detail": exc.detail,
-                    "input_schema": worker.input_schema, "billed": False})
-            # Everything else goes through the CORE's failure path, so an
-            # unbilled worker failure unwinds exactly like an unbilled audit.
-            response = _failed(auth, exc.detail)
-            response.status_code = status
-            try:
-                body = json.loads(bytes(response.body).decode())
-                body["reason"] = exc.reason
-                body["worker"] = worker.name
-                body["receipt_id"] = ledger.receipt_id_for(call_id)
-                # The core's headers minus the ones describing ITS body: the
-                # body just grew, and a copied Content-Length made every
-                # failed worker call die mid-response instead of a clean 502.
-                headers = {k: v for k, v in response.headers.items()
-                           if k.lower() not in ("content-length", "content-type")}
-                return JSONResponse(status_code=status, content=body, headers=headers)
-            except Exception:  # pragma: no cover
-                return response
-        except Exception as exc:  # pragma: no cover - unexpected adapter bug
-            log.exception("worker %s crashed", worker.name)
-            ledger.close_call(call_id, "failed", failure_reason="internal_error",
-                              failure_stage="execute", payer=payer)
-            if claimed and idempotency_key:
-                ledger.release_idempotency(idempotency_key)
-            return _failed(auth, f"{worker.name} failed: {type(exc).__name__}")
-
-        _record_attempts(call_id, ctx)
-
-        # Only now, with a real result in hand, is anything charged.
-        warning = await asyncio.get_running_loop().run_in_executor(
-            _executor, lambda: _bill(auth, worker.price_usd))
-
-        # The receipt: the ledger row read back, at /work/receipts/{id}. Its
-        # id is in the delivered body (so an idempotent replay returns the
-        # same one) and the result hash is written to the row before the
-        # response leaves, so the receipt can never describe a delivery the
-        # caller did not get.
-        receipt_id = ledger.receipt_id_for(call_id)
-        content = {
-            "status": "ok",
-            "worker": worker.name,
-            "price_usd": worker.price_usd,
-            "result": result,
-            "provenance": ctx.provenance(),
-            "receipt_id": receipt_id,
-            "receipt_url": f"/work/receipts/{receipt_id}",
-        }
-        if warning:
-            content["billing_warning"] = warning
-
-        delivered = _deliver(content, auth)
-        facts = _payment_facts_of(auth)
-        # Re-read the payer AFTER settlement: a Solana payment names its payer
-        # only in the facilitator's settle response, which did not exist when
-        # the call was opened. An EVM payer, known from the start, is unchanged.
-        payer = _payer_of(auth) or payer
-        settle_state = getattr(getattr(auth, "pending_payment", None), "settle_state", None)
-
-        # _deliver returns the payable 402 instead when the facilitator
-        # REFUSED to settle. Nothing was earned, so nothing is stored under
-        # the idempotency key and the ledger says refused.
-        refused = getattr(delivered, "status_code", 200) == 402
-        # Settled means the facilitator settled: its own verdict first, the
-        # payer's presence second (MPP hash payments carry no settle_state).
-        settled = not refused and (settle_state == "settled" or payer is not None)
-        ledger.close_call(
-            call_id, "refused" if refused else "ok",
-            latency_ms=ctx.provenance()["elapsed_ms"],
-            provider_used=",".join(ctx.providers_used) or None,
-            providers_tried=",".join(ctx.providers_used) or None,
-            attempts=len(ctx.attempts), settled=settled,
-            tx_hash=_tx_of(auth) or facts["tx_hash"], payer=payer,
-            result_hash=ledger.canonical_hash(result),
-            network=facts["network"], asset=facts["asset"],
-            pay_to=facts["pay_to"], amount_atomic=facts["amount_atomic"])
-
-        if idempotency_key and claimed:
-            if refused:
-                ledger.release_idempotency(idempotency_key)
-            else:
-                ledger.complete_idempotency(idempotency_key, json.dumps(content))
-        return delivered
+        return await serve(worker, payload, request, x_api_key, x_payment,
+                           authorization, idempotency_key)
 
     handler.__name__ = f"work_{worker.name.replace('.', '_')}"
     return handler
+
+
+async def serve(worker, payload: dict, request: Request, x_api_key, x_payment,
+                authorization, idempotency_key=None, sink=None):
+    """One paid job, from the availability check to the delivered body.
+
+    This is the whole HTTP handler after its body has been parsed, and the
+    MCP transport calls it directly with the tool's arguments as `payload`
+    and the /mcp request as `request` -- so a tool sold over MCP is gated,
+    run, billed, receipted and recorded by exactly the code its HTTP route
+    uses. Returns what the route returns: a dict (a delivered result with no
+    receipt headers to carry) or a JSONResponse (a refusal, a failure, or a
+    delivery carrying receipt headers). `sink`, when given, receives the
+    auth context under "auth" once the gate has passed, for a caller that
+    needs the settlement receipt in another shape.
+    """
+    skill = REGISTRY.get(worker.skill)
+    if skill is None:  # pragma: no cover
+        return JSONResponse(status_code=503, content={
+            "status": "error", "detail": f"{worker.name} is not implemented here."})
+
+    # Fail closed BEFORE the payment gate. A worker whose provider has no
+    # credential on this deployment cannot be delivered, so it must never
+    # quote a price -- taking money for a capability we cannot run is the
+    # worst outcome available here.
+    if not worker.available():
+        return JSONResponse(status_code=503, content={
+            "status": "error", "reason": "capability_unavailable", "billed": False,
+            "detail": (f"{worker.name} is not available on this deployment: "
+                       f"{worker.unavailable_reason()}"),
+        })
+
+    # Cheap input validation before the gate. The skills raise
+    # InvalidRequest from their own validators; run them dry by letting
+    # the job start only after payment, but catch the obvious shape errors
+    # here via the schema's required keys.
+    missing = [key for key in (worker.input_schema.get("required") or [])
+               if key not in payload]
+    if missing:
+        return JSONResponse(status_code=400, content={
+            "status": "error", "reason": "invalid_request",
+            "detail": f"Missing required field(s): {', '.join(missing)}.",
+            "input_schema": worker.input_schema, "billed": False})
+    # A skill that can tell, from the body alone, that it cannot deliver
+    # refuses here -- before the gate, so no nonce is burned and nothing is
+    # verified for a request that was always going to fail.
+    precheck = PRECHECKS.get(worker.skill)
+    if precheck is not None:
+        try:
+            precheck(payload)
+        except runtime.WorkerError as exc:
+            return JSONResponse(status_code=_error_status(exc.reason), content={
+                "status": "error", "reason": exc.reason, "detail": exc.detail,
+                "input_schema": worker.input_schema, "billed": False})
+
+    auth, err = await asyncio.get_running_loop().run_in_executor(
+        _executor, lambda: _authorize(
+            x_api_key, x_payment, authorization, request,
+            price_usd=worker.price_usd))
+    if err is not None:
+        return err
+    if sink is not None:
+        sink["auth"] = auth
+
+    call_id = uuid.uuid4().hex
+    payer = _payer_of(auth)
+
+    # Duplicate protection. A "done" key returns the stored result and
+    # NEVER calls _bill -- so the second payment stays verified but
+    # unsettled, and no money moves. That is why no refund path is needed.
+    claimed = False
+    if idempotency_key:
+        state, stored = await asyncio.get_running_loop().run_in_executor(
+            _executor, lambda: ledger.claim_idempotency(
+                idempotency_key, call_id, worker.name))
+        if state == "done":
+            try:
+                content = json.loads(stored) if stored else {}
+            except json.JSONDecodeError:
+                content = {}
+            content["idempotent_replay"] = True
+            content["billed"] = False
+            content["note"] = (
+                "Returned the stored result for this Idempotency-Key. This "
+                "request was not charged.")
+            return JSONResponse(status_code=200, content=content)
+        if state == "in_progress":
+            return JSONResponse(status_code=409, headers={"Retry-After": "5"}, content={
+                "status": "error", "reason": "in_progress", "billed": False,
+                "detail": ("A request with this Idempotency-Key is still running. "
+                           "Retry shortly to collect its result.")})
+        claimed = state == "claimed"
+
+    ledger.open_call(call_id=call_id, worker=worker.name, path=worker.path,
+                     price_usd=worker.price_usd, idempotency_key=idempotency_key,
+                     payer=payer, rail=_rail_of(auth),
+                     request_hash=ledger.canonical_hash(payload),
+                     node_version=_node_version)
+
+    try:
+        async with _semaphore:
+            result, ctx = await _run_job(worker, payload, call_id)
+    except runtime.WorkerError as exc:
+        _record_attempts(call_id, getattr(exc, "attempts", []))
+        ledger.close_call(call_id, "failed", failure_reason=exc.reason,
+                          failure_stage="execute", payer=payer)
+        if claimed and idempotency_key:
+            # The job failed and was not billed, so the caller is entitled
+            # to retry the same key.
+            ledger.release_idempotency(idempotency_key)
+        status = _error_status(exc.reason)
+        if status == 400:
+            # The caller's fault: nothing was billed, and _failed's 502
+            # wording would be wrong.
+            return JSONResponse(status_code=400, content={
+                "status": "error", "reason": exc.reason, "detail": exc.detail,
+                "input_schema": worker.input_schema, "billed": False})
+        # Everything else goes through the CORE's failure path, so an
+        # unbilled worker failure unwinds exactly like an unbilled audit.
+        response = _failed(auth, exc.detail)
+        response.status_code = status
+        try:
+            body = json.loads(bytes(response.body).decode())
+            body["reason"] = exc.reason
+            body["worker"] = worker.name
+            body["receipt_id"] = ledger.receipt_id_for(call_id)
+            # The core's headers minus the ones describing ITS body: the
+            # body just grew, and a copied Content-Length made every
+            # failed worker call die mid-response instead of a clean 502.
+            headers = {k: v for k, v in response.headers.items()
+                       if k.lower() not in ("content-length", "content-type")}
+            return JSONResponse(status_code=status, content=body, headers=headers)
+        except Exception:  # pragma: no cover
+            return response
+    except Exception as exc:  # pragma: no cover - unexpected adapter bug
+        log.exception("worker %s crashed", worker.name)
+        ledger.close_call(call_id, "failed", failure_reason="internal_error",
+                          failure_stage="execute", payer=payer)
+        if claimed and idempotency_key:
+            ledger.release_idempotency(idempotency_key)
+        return _failed(auth, f"{worker.name} failed: {type(exc).__name__}")
+
+    _record_attempts(call_id, ctx)
+
+    # Only now, with a real result in hand, is anything charged.
+    warning = await asyncio.get_running_loop().run_in_executor(
+        _executor, lambda: _bill(auth, worker.price_usd))
+
+    # The receipt: the ledger row read back, at /work/receipts/{id}. Its
+    # id is in the delivered body (so an idempotent replay returns the
+    # same one) and the result hash is written to the row before the
+    # response leaves, so the receipt can never describe a delivery the
+    # caller did not get.
+    receipt_id = ledger.receipt_id_for(call_id)
+    content = {
+        "status": "ok",
+        "worker": worker.name,
+        "price_usd": worker.price_usd,
+        "result": result,
+        "provenance": ctx.provenance(),
+        "receipt_id": receipt_id,
+        "receipt_url": f"/work/receipts/{receipt_id}",
+    }
+    if warning:
+        content["billing_warning"] = warning
+
+    delivered = _deliver(content, auth)
+    facts = _payment_facts_of(auth)
+    # Re-read the payer AFTER settlement: a Solana payment names its payer
+    # only in the facilitator's settle response, which did not exist when
+    # the call was opened. An EVM payer, known from the start, is unchanged.
+    payer = _payer_of(auth) or payer
+    settle_state = getattr(getattr(auth, "pending_payment", None), "settle_state", None)
+
+    # _deliver returns the payable 402 instead when the facilitator
+    # REFUSED to settle. Nothing was earned, so nothing is stored under
+    # the idempotency key and the ledger says refused.
+    refused = getattr(delivered, "status_code", 200) == 402
+    # Settled means the facilitator settled: its own verdict first, the
+    # payer's presence second (MPP hash payments carry no settle_state).
+    settled = not refused and (settle_state == "settled" or payer is not None)
+    ledger.close_call(
+        call_id, "refused" if refused else "ok",
+        latency_ms=ctx.provenance()["elapsed_ms"],
+        provider_used=",".join(ctx.providers_used) or None,
+        providers_tried=",".join(ctx.providers_used) or None,
+        attempts=len(ctx.attempts), settled=settled,
+        tx_hash=_tx_of(auth) or facts["tx_hash"], payer=payer,
+        result_hash=ledger.canonical_hash(result),
+        network=facts["network"], asset=facts["asset"],
+        pay_to=facts["pay_to"], amount_atomic=facts["amount_atomic"])
+
+    if idempotency_key and claimed:
+        if refused:
+            ledger.release_idempotency(idempotency_key)
+        else:
+            ledger.complete_idempotency(idempotency_key, json.dumps(content))
+    return delivered
 
 
 def register_routes() -> None:

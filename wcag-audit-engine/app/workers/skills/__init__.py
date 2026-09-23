@@ -16,10 +16,16 @@ rather than merely coexist.
 
 from . import (  # noqa: F401
     chain, code, composites, data, extract, fetch, llm, maps, market, media,
-    monitor, search, security, verify,
+    monitor, search, security, stats, verify,
 )
 
 REGISTRY = {}
+# A skill may also export PRECHECKS: {name: fn(payload)} -- a validator the
+# router runs BEFORE the payment gate, raising a WorkerError (InvalidRequest,
+# ProviderUnavailable) for a request it can already tell it cannot deliver.
+# Refusing there costs the caller nothing and burns no x402 nonce.
+PRECHECKS = {}
 for _module in (extract, llm, chain, market, data, composites, search, code,
-                media, security, monitor, verify, fetch, maps):
+                media, security, monitor, verify, fetch, maps, stats):
     REGISTRY.update(_module.SKILLS)
+    PRECHECKS.update(getattr(_module, "PRECHECKS", {}))

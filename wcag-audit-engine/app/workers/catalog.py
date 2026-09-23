@@ -49,6 +49,50 @@ def _obj(properties: dict, required: list) -> dict:
             "additionalProperties": False}
 
 
+_POINT = {"oneOf": [
+    {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+     "description": "[x, y]"},
+    {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}},
+     "required": ["x", "y"], "additionalProperties": False},
+]}
+_STATS_METRICS = ["linear_regression", "normal_distribution", "p_values", "prediction"]
+_STATS_INPUT = dict(_obj({
+    "points": {"type": "array", "items": _POINT, "minItems": 2, "maxItems": 100000,
+               "description": ("The data: [x, y] pairs (or {x, y} objects), 2 to 100000 "
+                               "of them; at least 3 for a regression. Use this OR `table`.")},
+    "table": {"type": "string",
+              "description": ("BigQuery table to read instead of `points`: "
+                              "project.dataset.table, readable by the node's service "
+                              "account (public datasets are). Needs x_column and y_column.")},
+    "x_column": {"type": "string", "description": "Numeric column for x, with `table`."},
+    "y_column": {"type": "string", "description": "Numeric column for y, with `table`."},
+    "max_rows": {"type": "integer", "minimum": 3, "maximum": 100000,
+                 "description": ("Rows to read from `table`, default 10000. A larger table "
+                                 "is reduced to this many rows by FARM_FINGERPRINT order, "
+                                 "so the same table always yields the same rows.")},
+    "metrics": {"type": "array", "items": {"type": "string", "enum": _STATS_METRICS},
+                "minItems": 1, "uniqueItems": True,
+                "description": ("Which results to compute. Default: linear_regression, "
+                                "normal_distribution and p_values, plus prediction when "
+                                "predict_x is given.")},
+    "predict_x": {"type": "array", "items": {"type": "number"}, "minItems": 1, "maxItems": 100,
+                  "description": "x values to predict y at, with mean and prediction intervals."},
+    "alpha": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1,
+              "description": "Significance level for p-value validation and intervals. Default 0.05."},
+    "distribution_of": {"type": "string", "enum": ["y", "x", "residuals"],
+                        "description": "Which values the normal model fits. Default y."},
+    "probability_queries": {
+        "type": "array", "maxItems": 50,
+        "items": {"type": "object", "minProperties": 1, "maxProperties": 1,
+                  "properties": {"below": {"type": "number"}, "above": {"type": "number"},
+                                 "between": {"type": "array", "items": {"type": "number"},
+                                             "minItems": 2, "maxItems": 2}},
+                  "additionalProperties": False},
+        "description": ("Probabilities to read off the fitted normal model: "
+                        "{\"below\": v}, {\"above\": v} or {\"between\": [a, b]}.")},
+}, []), oneOf=[{"required": ["points"]}, {"required": ["table", "x_column", "y_column"]}])
+
+
 class Worker:
     """A sellable unit of completed work."""
 
@@ -481,6 +525,28 @@ CATALOG = [
         pricing_basis="Provisional, completed-work tier. Bytes scanned measured per call.",
         requires=("bigquery",)),
     Worker(
+        name="stats.probability", price_usd=0.50, tier="standard",
+        title="Predictive probability engine: regression, normal model, p-values",
+        description=(
+            "Deterministic statistics over (x, y) points: ordinary least squares "
+            "linear regression with standard errors and confidence intervals, a "
+            "fitted normal distribution with quantiles and probability queries, "
+            "exact Student t and Jarque-Bera p-values validated at your alpha, and "
+            "predictions with prediction intervals. Points come inline or from a "
+            "BigQuery table (two numeric columns; above max_rows the rows are "
+            "chosen by fingerprint, never at random). Pure arithmetic with exactly "
+            "rounded sums: the same input always returns the same numbers, and no "
+            "LLM is anywhere in the path."),
+        tags=["statistics", "regression", "probability", "p-value",
+              "normal-distribution", "prediction", "bigquery", "deterministic"],
+        input_schema=_STATS_INPUT,
+        returns=("source{}, n, alpha, confidence_level, metrics[], linear_regression{}, "
+                 "normal_distribution{}, p_values{}, prediction[], notes[], method."),
+        skill="stats.probability", max_seconds=200,
+        pricing_basis=("Provisional, standard tier. Inline points cost nothing to serve; a "
+                       "table read is metered by bytes scanned under the 20 GiB ceiling."),
+        requires=()),
+    Worker(
         name="verify.claims", price_usd=5.00, tier="advanced",
         title="Verify claims against sources",
         description=(
@@ -777,6 +843,10 @@ _EXAMPLE_VALUES = {
 _DAILY_SERIES = "bigquery-public-data.covid19_nyt.us_states"
 
 _EXAMPLE_OVERRIDES = {
+    # Either source is valid, so nothing is `required`; the example shows the
+    # inline form with a prediction and a probability query.
+    "stats.probability": {"points": [[1, 2.1], [2, 3.9], [3, 6.2], [4, 7.8], [5, 10.1]],
+                          "predict_x": [6], "probability_queries": [{"below": 8}]},
     # llm.generate and image.generate both take a required "prompt", but
     # sharing one example would make one of the two look like a mistake.
     "image.generate": {"prompt": "A beehive built from circuit boards, isometric illustration"},

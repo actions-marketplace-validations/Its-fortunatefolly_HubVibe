@@ -33,7 +33,7 @@ STATIC = REPO_ROOT / "wcag-audit-engine" / "app" / "static"
 ARD_SCHEMA_PATH = REPO_ROOT / "tests" / "fixtures" / "ard-entry.schema.json"
 
 TEST_PAY_TO = "0x837C40E2B4e976f43Ffb4451eE281A00fA9477dd"
-TITLE = "HubVibe: 37 Machine-Payable Dev Utilities and WCAG Audits"
+TITLE = "HubVibe: 38 Machine-Payable Dev Utilities and WCAG Audits"
 
 
 def _load_workers():
@@ -111,7 +111,7 @@ def test_every_worker_publishes_an_explicit_output_schema_not_a_placeholder():
             if w.output_schema.get("type") != "object"
             or not (w.output_schema.get("properties") or {})]
     assert not thin, f"workers still advertising a placeholder output: {thin}"
-    assert len(W.catalog.CATALOG) == 37
+    assert len(W.catalog.CATALOG) == 38
     assert set(W.catalog.contract.OUTPUT_SCHEMAS) == {w.name for w in W.catalog.CATALOG}
 
 

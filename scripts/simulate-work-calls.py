@@ -14,8 +14,9 @@ catalog:
 
   * discovery -- a live bee is listed in /work, /.well-known/agent.json and
     openapi.json (with x-payment-info); an unavailable one is listed in none
-    of them and answers 503 instead of quoting a price. (Bees are not MCP
-    tools: /mcp sells the audits only, and its paywall is not touched here.)
+    of them and answers 503 instead of quoting a price. (The /mcp paywall is
+    not touched here; the one bee also sold as an MCP tool, stats.probability,
+    is covered by tests/test_workers_stats.py.)
   * 402       -- the unpaid call is challenged at exactly the catalog price
   * execution -- the call is paid with the real x402 client and the REAL
     provider runs (Vertex, BigQuery, Speech, Base RPC, Coinbase, ...)

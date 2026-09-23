@@ -68,6 +68,9 @@ ROUTES = [
     ("utility", "/work/search/web", {"query": "x402 payment protocol"}),
     ("standard", "/work/llm/generate", {"prompt": "In one sentence, what is HubVibe?"}),
     ("standard", "/work/code/execute", {"code": "print(sum(range(10)))"}),
+    ("standard", "/work/stats/probability", {
+        "points": [[1, 2.1], [2, 3.9], [3, 6.2], [4, 7.8], [5, 10.1]],
+        "predict_x": [6], "probability_queries": [{"below": 8}]}),
     ("standard", "/work/image/generate", {
         "prompt": "A beehive built from circuit boards, isometric illustration"}),
     ("standard", "/work/speech/synthesize", {

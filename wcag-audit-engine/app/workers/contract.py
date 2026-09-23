@@ -160,6 +160,34 @@ _VERDICT = _obj({
 }, ["claim", "verdict"], "One claim and its verdict.")
 
 
+_BOUNDS = _arr(_n("Bound.", 0.0), "Lower and upper bound at the confidence level.", [1.43, 2.53])
+_T_TEST = _obj({
+    "null_hypothesis": _s("What the test rejects.", "slope = 0 (no linear relationship)"),
+    "t": _n("Student t statistic; null when undefined (a perfect fit).", 11.4, nullable=True),
+    "p_value": _n("Two-sided p-value; null when undefined.", 0.0015, nullable=True),
+    "significant_at_alpha": {"type": ["boolean", "null"], "description": "p_value < alpha.",
+                             "examples": [True]},
+}, ["null_hypothesis", "t", "p_value", "significant_at_alpha"], "One two-sided Student t test.")
+_NORMALITY = {
+    "type": ["object", "null"],
+    "description": "Jarque-Bera normality test; null when the values are constant.",
+    "properties": {
+        "test": _const("jarque_bera", "The test."),
+        "statistic": _n("Jarque-Bera statistic.", 0.42),
+        "p_value": _n("Chi-square(2) p-value, exp(-JB/2).", 0.81),
+        "null_hypothesis": _s("What the test rejects.", "the values are normally distributed"),
+        "reject_at_alpha": _b("p_value < alpha: not normal at this alpha.", False),
+    },
+    "required": ["test", "statistic", "p_value", "null_hypothesis", "reject_at_alpha"],
+}
+
+
+def _nobj(properties: dict, required: list, description: str) -> dict:
+    """An object that is null when the metric was not requested or is undefined."""
+    return {"type": ["object", "null"], "properties": properties, "required": required,
+            "description": description}
+
+
 # --- one schema per worker, keyed by catalog name -------------------------------
 
 OUTPUT_SCHEMAS = {
@@ -358,6 +386,99 @@ OUTPUT_SCHEMAS = {
         "mime_type": _s("Video MIME type.", "video/mp4"),
         "model": _s("Video model.", "veo-3.0-generate-001"),
     }, ["prompt", "aspect_ratio", "duration_seconds", "mime_type", "model"]),
+
+    "stats.probability": _obj({
+        "source": _obj({
+            "type": _enum(["points", "bigquery"], "Where the points came from.", "points"),
+            "table": _s("BigQuery table read, when source is bigquery.", None, nullable=True),
+            "x_column": _s("Column used for x, when source is bigquery.", None, nullable=True),
+            "y_column": _s("Column used for y, when source is bigquery.", None, nullable=True),
+            "sql": _s("The read-only SQL that ran, when source is bigquery.", None, nullable=True),
+            "rows_available": _i("Rows with finite x and y in the table; null for inline points.",
+                                 None, nullable=True),
+            "rows_used": _i("Points the statistics were computed from.", 5),
+            "sampled": _b("True when the table had more usable rows than were read.", False),
+            "gib_processed": _n("Gibibytes BigQuery scanned; null for inline points.", None,
+                                nullable=True),
+        }, ["type", "table", "x_column", "y_column", "sql", "rows_available", "rows_used",
+            "sampled", "gib_processed"], "Where the data came from and how much of it was used."),
+        "n": _i("Number of points.", 5),
+        "alpha": _n("Significance level used.", 0.05),
+        "confidence_level": _n("1 - alpha: the level of every interval.", 0.95),
+        "metrics": _arr(_enum(["linear_regression", "normal_distribution", "p_values", "prediction"],
+                              "Metric name.", "linear_regression"),
+                        "Metrics computed, in canonical order.",
+                        ["linear_regression", "normal_distribution", "p_values", "prediction"]),
+        "linear_regression": _nobj({
+            "slope": _n("OLS slope.", 1.98),
+            "intercept": _n("OLS intercept.", 0.08),
+            "r": _n("Pearson correlation; null when y is constant.", 0.998, nullable=True),
+            "r_squared": _n("Coefficient of determination; null when y is constant.", 0.996, nullable=True),
+            "adjusted_r_squared": _n("R^2 adjusted for degrees of freedom.", 0.995, nullable=True),
+            "slope_std_error": _n("Standard error of the slope.", 0.071),
+            "intercept_std_error": _n("Standard error of the intercept.", 0.236),
+            "residual_std_error": _n("Standard error of the residuals, sqrt(SSE / df).", 0.225),
+            "degrees_of_freedom": _i("n - 2.", 3),
+            "slope_t": _n("t statistic of the slope; null when undefined.", 27.8, nullable=True),
+            "intercept_t": _n("t statistic of the intercept; null when undefined.", 0.34, nullable=True),
+            "t_critical": _n("Two-sided t critical value at alpha with df degrees of freedom.", 3.18),
+            "slope_ci": _BOUNDS,
+            "intercept_ci": _BOUNDS,
+            "f_statistic": _n("F statistic of the regression (t^2); null when undefined.", 773.0,
+                              nullable=True),
+            "sse": _n("Sum of squared residuals.", 0.152),
+            "sst": _n("Total sum of squares of y.", 39.4),
+            "x_mean": _n("Mean of x.", 3.0),
+            "y_mean": _n("Mean of y.", 6.02),
+        }, ["slope", "intercept", "r", "r_squared", "adjusted_r_squared", "slope_std_error",
+            "intercept_std_error", "residual_std_error", "degrees_of_freedom", "slope_t",
+            "intercept_t", "t_critical", "slope_ci", "intercept_ci", "f_statistic", "sse", "sst",
+            "x_mean", "y_mean"], "Ordinary least squares fit of y on x; null when not requested."),
+        "normal_distribution": _nobj({
+            "of": _enum(["y", "x", "residuals"], "Which values the model fits.", "y"),
+            "mean": _n("Sample mean.", 6.02),
+            "std_dev": _n("Sample standard deviation (n - 1).", 3.14),
+            "variance": _n("Sample variance (n - 1).", 9.86),
+            "min": _n("Smallest value.", 2.1),
+            "max": _n("Largest value.", 10.1),
+            "median": _n("Median of the values.", 6.2),
+            "skewness": _n("Sample skewness; null when the values are constant.", 0.05, nullable=True),
+            "excess_kurtosis": _n("Excess kurtosis; null when the values are constant.", -1.3,
+                                  nullable=True),
+            "quantiles": {"type": ["array", "null"],
+                          "description": "Quantiles of the fitted normal; null when degenerate.",
+                          "items": _obj({"p": _n("Probability.", 0.95),
+                                         "value": _n("Value at that quantile.", 11.19)},
+                                        ["p", "value"])},
+            "probabilities": _arr(_obj({"query": _free("The query as sent.", {"below": 8.0}, ["object"]),
+                                        "probability": _n("Probability under the fitted normal.", 0.736)},
+                                       ["query", "probability"]),
+                                  "Answers to probability_queries, in order.",
+                                  [{"query": {"below": 8.0}, "probability": 0.736}]),
+            "normality": _NORMALITY,
+        }, ["of", "mean", "std_dev", "variance", "min", "max", "median", "skewness",
+            "excess_kurtosis", "quantiles", "probabilities", "normality"],
+            "Normal model of the chosen values; null when not requested."),
+        "p_values": _nobj({
+            "slope": _T_TEST,
+            "intercept": _T_TEST,
+            "normality_of_residuals": _NORMALITY,
+        }, ["slope", "intercept", "normality_of_residuals"],
+            "Hypothesis tests validated at alpha; null when not requested."),
+        "prediction": {"type": ["array", "null"],
+                       "description": "One entry per predict_x; null when not requested.",
+                       "items": _obj({"x": _n("The x asked for.", 6.0),
+                                      "y_hat": _n("Predicted y.", 11.96),
+                                      "mean_ci": _BOUNDS,
+                                      "prediction_interval": _BOUNDS},
+                                     ["x", "y_hat", "mean_ci", "prediction_interval"])},
+        "notes": _arr(_s("A caveat about a degenerate input.", "The points lie exactly on a line."),
+                      "Caveats about the input; empty when there are none.", []),
+        "method": _s("How the numbers were produced.",
+                     "Ordinary least squares (closed form). Student t p-values from the "
+                     "regularised incomplete beta function..."),
+    }, ["source", "n", "alpha", "confidence_level", "metrics", "linear_regression",
+        "normal_distribution", "p_values", "prediction", "notes", "method"]),
 
     "data.query": _obj({
         "sql": _s("The SQL that ran.", "SELECT name, SUM(number) AS n FROM `bigquery-public-data.usa_names.usa_1910_2013` GROUP BY name ORDER BY n DESC LIMIT 5"),
@@ -565,7 +686,7 @@ RESPONSE_ENVELOPE = {
     "description": (
         "The 200 body of every paid /work call. `result` is the worker's own "
         "output (its schema is per route); everything else is the same on all "
-        "37 routes. A receipt for the job is at `receipt_url`."),
+        "38 routes. A receipt for the job is at `receipt_url`."),
     "properties": {
         "status": _const("ok", "Present only on a delivered result."),
         "worker": _s("Catalog name of the worker that ran.", "market.quote"),
@@ -743,6 +864,13 @@ REPRESENTATIVE_QUERIES = {
         "generate a short video clip from a text prompt",
         "text to video with Veo",
         "create a four second video from a description",
+    ],
+    "stats.probability": [
+        "linear regression with p-values on a list of x y points",
+        "fit a normal distribution and get the probability a value falls below a threshold",
+        "is the correlation between x and y statistically significant at alpha 0.05",
+        "predict y at a new x with a prediction interval",
+        "regression statistics on two numeric columns of a BigQuery table",
     ],
     "data.query": [
         "run read-only SQL against a BigQuery public dataset",

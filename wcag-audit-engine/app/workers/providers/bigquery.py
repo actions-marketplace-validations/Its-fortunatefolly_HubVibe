@@ -93,10 +93,13 @@ class _BigQuery:
                 f"{google_auth.project()}/queries")
 
     async def _post(self, body: dict) -> dict:
+        return await self._request("POST", self._url(), json=body)
+
+    async def _request(self, method: str, url: str, **kwargs) -> dict:
         try:
             headers = await google_auth.headers()
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                response = await client.post(self._url(), headers=headers, json=body)
+                response = await client.request(method, url, headers=headers, **kwargs)
         except httpx.TimeoutException as exc:
             raise runtime.TransientProviderError(f"BigQuery timed out: {exc}") from exc
         except httpx.HTTPError as exc:
@@ -172,6 +175,67 @@ class _BigQuery:
                 "row_count": len(rows),
                 "total_rows": int(data.get("totalRows") or len(rows)),
                 "truncated": int(data.get("totalRows") or 0) > len(rows),
+                "bytes_processed": billed,
+                "gib_processed": round(billed / _BYTES_PER_GIB, 4),
+                "cache_hit": bool(data.get("cacheHit")),
+            },
+            cost_micros=cost, cost_measured=measured,
+            usage=f"bytes={billed}")
+
+    async def rows(self, sql: str, max_rows: int) -> runtime.ProviderResult:
+        """Like query(), but returns up to `max_rows` rows as plain value
+        lists, following pageToken across result pages. For the workers that
+        compute over a column rather than show a handful of rows."""
+        if not google_auth.configured():
+            raise runtime.ProviderUnavailable(google_auth.unavailable_reason())
+        ceiling_bytes = int(_MAX_GIB * _BYTES_PER_GIB)
+        estimated = await self.estimate(sql)
+        if estimated > ceiling_bytes:
+            raise runtime.InvalidRequest(
+                f"Query would scan {estimated / _BYTES_PER_GIB:.2f} GiB, over this "
+                f"worker's {_MAX_GIB:.0f} GiB limit. Use a smaller table or view.")
+
+        page_size = min(int(max_rows), 50_000)
+        data = await self._post({
+            "query": sql,
+            "useLegacySql": False,
+            "maximumBytesBilled": str(ceiling_bytes),
+            "maxResults": page_size,
+            "timeoutMs": int(_TIMEOUT * 1000),
+        })
+        if data.get("jobComplete") is False:
+            raise runtime.TransientProviderError(
+                f"BigQuery did not finish within {_TIMEOUT:.0f}s; no rows came back.",
+                reason="provider_timeout")
+
+        def cells(page: dict) -> list:
+            return [[cell.get("v") for cell in row.get("f", [])]
+                    for row in (page.get("rows") or [])]
+
+        rows = cells(data)
+        job = data.get("jobReference") or {}
+        token = data.get("pageToken")
+        while token and len(rows) < max_rows and job.get("jobId"):
+            params = {"pageToken": token, "maxResults": page_size,
+                      "timeoutMs": int(_TIMEOUT * 1000)}
+            if job.get("location"):
+                params["location"] = job["location"]
+            page = await self._request(
+                "GET",
+                f"https://bigquery.googleapis.com/bigquery/v2/projects/"
+                f"{job.get('projectId') or google_auth.project()}/queries/{job['jobId']}",
+                params=params)
+            rows.extend(cells(page))
+            token = page.get("pageToken")
+        rows = rows[:max_rows]
+
+        billed = int(data.get("totalBytesProcessed") or estimated or 0)
+        cost, measured = _cost_micros(billed)
+        return runtime.ProviderResult(
+            value={
+                "rows": rows,
+                "row_count": len(rows),
+                "total_rows": int(data.get("totalRows") or len(rows)),
                 "bytes_processed": billed,
                 "gib_processed": round(billed / _BYTES_PER_GIB, 4),
                 "cache_hit": bool(data.get("cacheHit")),

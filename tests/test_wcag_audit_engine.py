@@ -113,7 +113,8 @@ def test_mcp_json_served_and_matches_repo_manifest(monkeypatch):
     tool_names = {tool["name"] for tool in body["tools"]}
     # An exact pin: any tool served that this does not explain, or missing
     # from it, fails here.
-    expected = {"audit_wcag", "audit_seo", "audit_security", "audit_performance", "audit_bundle"}
+    expected = {"audit_wcag", "audit_seo", "audit_security", "audit_performance", "audit_bundle",
+                "hubvibe_predictive_probability_engine"}
     assert tool_names == expected
 
 
@@ -167,6 +168,9 @@ def test_mcp_json_prices_come_from_the_catalog(monkeypatch):
     body = TestClient(module.app).get("/mcp.json").json()
 
     catalog = {entry["path"]: entry["price_usd"] for entry in module._CATALOG}
+    # A worker-backed tool is priced from ITS catalog row, the same way.
+    for worker in module._mcp_worker_tools().values():
+        catalog[worker.path] = worker.price_usd
     served = {
         tool["httpEndpoint"]["path"]: tool["httpEndpoint"]["price_usd"]
         for tool in body["tools"]
@@ -2294,7 +2298,8 @@ def test_mcp_tools_list_is_free_and_complete(monkeypatch):
     tools = _rpc(client, "tools/list").json()["result"]["tools"]
     names = {t["name"] for t in tools}
     expected = {
-        "audit_wcag", "audit_seo", "audit_security", "audit_performance", "audit_bundle"
+        "audit_wcag", "audit_seo", "audit_security", "audit_performance", "audit_bundle",
+        "hubvibe_predictive_probability_engine",
     }
     assert names == expected
     for t in tools:
@@ -2326,8 +2331,10 @@ def test_mcp_tool_schemas_never_admit_an_empty_call(monkeypatch):
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate({}, schema)
         # And the arguments the route genuinely accepts must stay legal --
-        # the bare-url body every audit tool accepts.
-        jsonschema.validate({"url": "https://example.com"}, schema)
+        # the bare-url body every audit tool accepts; the worker-backed
+        # tool's example call is checked in test_workers_stats.py.
+        if t["name"].startswith("audit_"):
+            jsonschema.validate({"url": "https://example.com"}, schema)
 
 
 def test_mcp_tool_call_without_payment_is_an_error_result_not_a_crash(monkeypatch):
@@ -2527,6 +2534,12 @@ def test_every_mcp_tool_declares_what_comes_back_not_just_what_goes_in(monkeypat
         assert isinstance(annotations["readOnlyHint"], bool), tool["name"]
         assert isinstance(annotations["idempotentHint"], bool), tool["name"]
         assert isinstance(annotations["openWorldHint"], bool), tool["name"]
+        if not tool["name"].startswith("audit_"):
+            # A worker-backed tool returns its route's 200 envelope; the
+            # field callers branch on there is `status`.
+            assert "status" in tool["outputSchema"]["properties"], tool["name"]
+            assert "result" in tool["outputSchema"]["properties"], tool["name"]
+            continue
         assert "pass" in tool["outputSchema"]["properties"], (
             f"{tool['name']} must declare the field callers branch on"
         )
@@ -3675,6 +3688,84 @@ def test_an_x402_mcp_client_pays_in_meta_and_gets_its_receipt_in_meta(monkeypatc
     assert receipt is not None and receipt.transaction == settlement.transaction
     assert receipt.payer.lower() == account.address.lower()
     # ...and still in the HTTP header for clients that can see headers.
+    assert paid.headers.get("PAYMENT-RESPONSE")
+
+
+def test_an_x402_mcp_client_pays_for_the_worker_tool_in_meta_and_is_receipted(monkeypatch, load_main_fresh):
+    """The same round trip for the worker-backed tool: the paywall the
+    endpoint serves for hubvibe_predictive_probability_engine is a v2
+    challenge at the worker's price, the real client signs it, the payment
+    in `_meta` reaches the one verify path priced for THIS tool, the job
+    runs through the worker route (ledger row, receipt_url in the body) and
+    the settlement comes back in `_meta` and the header."""
+    from fastapi.testclient import TestClient
+    from x402.http.utils import decode_payment_signature_header
+    from x402.mcp.utils import (
+        extract_payment_required_from_result,
+        extract_payment_response_from_meta,
+    )
+    from x402.schemas import PaymentRequired, SettleResponse
+
+    _x402_env(monkeypatch)
+    module = load_main_fresh("wcag_audit_main_mcp_worker_tool")
+    module.workers.router.configure(
+        authorize_and_rate_limit=module._authorize_and_rate_limit,
+        bill=module._bill, deliver=module._deliver,
+        failed_response=module._failed_audit_response,
+        node_version=module.SERVICE_VERSION,
+        mpp_payment_facts=module.mpp_payments.settlement_for)
+    client = TestClient(module.app)
+    tool = "hubvibe_predictive_probability_engine"
+    arguments = {"points": [[1, 2.1], [2, 3.9], [3, 6.2], [4, 7.8], [5, 10.1]], "predict_x": [6]}
+
+    unpaid = client.post("/mcp", json=_tools_call(tool, arguments)).json()["result"]
+    assert unpaid["isError"] is True
+    challenge = extract_payment_required_from_result(_mcp_result_object(unpaid))
+    assert isinstance(challenge, PaymentRequired)
+    assert challenge.accepts[0].amount == "500000", "priced at the worker's $0.50"
+    assert challenge.resource.url == f"{module.PUBLIC_BASE_URL}/mcp"
+    assert challenge.extensions["bazaar"]["info"]["input"]["toolName"] == tool
+    assert "points" in challenge.extensions["bazaar"]["info"]["input"]["example"]
+    assert unpaid["structuredContent"]["price_usd"] == 0.50
+
+    x402_client, account = _x402_core_client()
+    payload_dict = x402_client.create_payment_payload(challenge).model_dump(by_alias=True)
+    seen = []
+    settlement = SettleResponse(
+        success=True, transaction="0x" + "cd" * 32, network="eip155:8453", payer=account.address
+    )
+
+    def _verify(header, price=None, **kw):
+        seen.append((header, price))
+        return module.x402_payments.PendingPayment(None, None, price)
+
+    def _settle(pending):
+        pending.settle_result = settlement
+        return True
+
+    monkeypatch.setattr(module.x402_payments, "verify_only_sync", _verify)
+    monkeypatch.setattr(module.x402_payments, "settle_sync", _settle)
+
+    paid = client.post(
+        "/mcp", json=_tools_call(tool, arguments, meta={"x402/payment": payload_dict}, request_id=2)
+    )
+    result = paid.json()["result"]
+    assert result["isError"] is False, result
+    body = result["structuredContent"]
+    assert body["status"] == "ok" and body["worker"] == "stats.probability"
+    assert body["price_usd"] == 0.50
+    assert body["result"]["linear_regression"]["slope"] > 0
+    assert body["result"]["prediction"][0]["x"] == 6.0
+    assert client.get(body["receipt_url"]).json()["request"]["worker"] == "stats.probability"
+
+    assert len(seen) == 1
+    header, price = seen[0]
+    assert price == "$0.50"
+    decoded = decode_payment_signature_header(header)
+    assert decoded.payload["signature"] == payload_dict["payload"]["signature"]
+
+    receipt = extract_payment_response_from_meta(_mcp_result_object(result))
+    assert receipt is not None and receipt.transaction == settlement.transaction
     assert paid.headers.get("PAYMENT-RESPONSE")
 
 

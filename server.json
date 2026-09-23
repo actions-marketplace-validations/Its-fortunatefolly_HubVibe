@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Its-fortunatefolly/hubvibe",
-  "title": "HubVibe: 37 Machine-Payable Dev Utilities and WCAG Audits",
-  "description": "Pay per call via HTTP 402: 5 deterministic site audits as MCP tools, 37 /work jobs, receipt per job.",
+  "title": "HubVibe: 38 Machine-Payable Dev Utilities and WCAG Audits",
+  "description": "Pay per call via HTTP 402: 5 site audits + a statistics engine as MCP tools, 38 /work jobs, receipts",
   "version": "1.4.1",
   "icons": [
     {
@@ -25,7 +25,7 @@
       "headers": [
         {
           "name": "X-API-Key",
-          "description": "Optional prepaid key. Tool discovery is free; each audit is billed per call over HTTP 402 on the rails listed in https://hubvibe-io.com/.well-known/agent.json. The 37 /work capabilities and every price are in https://hubvibe-io.com/openapi.json.",
+          "description": "Optional prepaid key. Tool discovery is free; each audit is billed per call over HTTP 402 on the rails listed in https://hubvibe-io.com/.well-known/agent.json. The 38 /work capabilities and every price are in https://hubvibe-io.com/openapi.json.",
           "isRequired": false,
           "isSecret": true
         }

@@ -2,5 +2,1146 @@
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": [
     "Its-fortunatefolly"
+  ],
+  "tools": [
+    {
+      "name": "hubvibe_predictive_probability_engine",
+      "title": "Predictive probability engine: regression, normal model, p-values",
+      "description": "Deterministic statistics over (x, y) points: ordinary least squares linear regression with standard errors and confidence intervals, a fitted normal distribution with quantiles and probability queries, exact Student t and Jarque-Bera p-values validated at your alpha, and predictions with prediction intervals. Points come inline or from a BigQuery table (two numeric columns; above max_rows the rows are chosen by fingerprint, never at random). Pure arithmetic with exactly rounded sums: the same input always returns the same numbers, and no LLM is anywhere in the path. $0.50 per call. Returns: source{}, n, alpha, confidence_level, metrics[], linear_regression{}, normal_distribution{}, p_values{}, prediction[], notes[], method.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "points": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "description": "[x, y]"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "minItems": 2,
+            "maxItems": 100000,
+            "description": "The data: [x, y] pairs (or {x, y} objects), 2 to 100000 of them; at least 3 for a regression. Use this OR `table`."
+          },
+          "table": {
+            "type": "string",
+            "description": "BigQuery table to read instead of `points`: project.dataset.table, readable by the node's service account (public datasets are). Needs x_column and y_column."
+          },
+          "x_column": {
+            "type": "string",
+            "description": "Numeric column for x, with `table`."
+          },
+          "y_column": {
+            "type": "string",
+            "description": "Numeric column for y, with `table`."
+          },
+          "max_rows": {
+            "type": "integer",
+            "minimum": 3,
+            "maximum": 100000,
+            "description": "Rows to read from `table`, default 10000. A larger table is reduced to this many rows by FARM_FINGERPRINT order, so the same table always yields the same rows."
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "linear_regression",
+                "normal_distribution",
+                "p_values",
+                "prediction"
+              ]
+            },
+            "minItems": 1,
+            "uniqueItems": true,
+            "description": "Which results to compute. Default: linear_regression, normal_distribution and p_values, plus prediction when predict_x is given."
+          },
+          "predict_x": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 1,
+            "maxItems": 100,
+            "description": "x values to predict y at, with mean and prediction intervals."
+          },
+          "alpha": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "exclusiveMaximum": 1,
+            "description": "Significance level for p-value validation and intervals. Default 0.05."
+          },
+          "distribution_of": {
+            "type": "string",
+            "enum": [
+              "y",
+              "x",
+              "residuals"
+            ],
+            "description": "Which values the normal model fits. Default y."
+          },
+          "probability_queries": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 1,
+              "properties": {
+                "below": {
+                  "type": "number"
+                },
+                "above": {
+                  "type": "number"
+                },
+                "between": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              },
+              "additionalProperties": false
+            },
+            "description": "Probabilities to read off the fitted normal model: {\"below\": v}, {\"above\": v} or {\"between\": [a, b]}."
+          }
+        },
+        "required": [],
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "points"
+            ]
+          },
+          {
+            "required": [
+              "table",
+              "x_column",
+              "y_column"
+            ]
+          }
+        ]
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "description": "The 200 body of every paid /work call. `result` is the worker's own output (its schema is per route); everything else is the same on all 38 routes. A receipt for the job is at `receipt_url`.",
+        "required": [
+          "status",
+          "worker",
+          "price_usd",
+          "result",
+          "provenance",
+          "receipt_id",
+          "receipt_url"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "description": "Present only on a delivered result."
+          },
+          "worker": {
+            "type": "string",
+            "description": "Catalog name of the worker that ran.",
+            "examples": [
+              "market.quote"
+            ]
+          },
+          "price_usd": {
+            "type": "number",
+            "description": "What this call cost, in USD.",
+            "examples": [
+              0.02
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "points",
+                      "bigquery"
+                    ],
+                    "description": "Where the points came from.",
+                    "examples": [
+                      "points"
+                    ]
+                  },
+                  "table": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "BigQuery table read, when source is bigquery.",
+                    "examples": [
+                      null
+                    ]
+                  },
+                  "x_column": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Column used for x, when source is bigquery.",
+                    "examples": [
+                      null
+                    ]
+                  },
+                  "y_column": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Column used for y, when source is bigquery.",
+                    "examples": [
+                      null
+                    ]
+                  },
+                  "sql": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The read-only SQL that ran, when source is bigquery.",
+                    "examples": [
+                      null
+                    ]
+                  },
+                  "rows_available": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Rows with finite x and y in the table; null for inline points.",
+                    "examples": [
+                      null
+                    ]
+                  },
+                  "rows_used": {
+                    "type": "integer",
+                    "description": "Points the statistics were computed from.",
+                    "examples": [
+                      5
+                    ]
+                  },
+                  "sampled": {
+                    "type": "boolean",
+                    "description": "True when the table had more usable rows than were read.",
+                    "examples": [
+                      false
+                    ]
+                  },
+                  "gib_processed": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "Gibibytes BigQuery scanned; null for inline points.",
+                    "examples": [
+                      null
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "table",
+                  "x_column",
+                  "y_column",
+                  "sql",
+                  "rows_available",
+                  "rows_used",
+                  "sampled",
+                  "gib_processed"
+                ],
+                "description": "Where the data came from and how much of it was used."
+              },
+              "n": {
+                "type": "integer",
+                "description": "Number of points.",
+                "examples": [
+                  5
+                ]
+              },
+              "alpha": {
+                "type": "number",
+                "description": "Significance level used.",
+                "examples": [
+                  0.05
+                ]
+              },
+              "confidence_level": {
+                "type": "number",
+                "description": "1 - alpha: the level of every interval.",
+                "examples": [
+                  0.95
+                ]
+              },
+              "metrics": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "linear_regression",
+                    "normal_distribution",
+                    "p_values",
+                    "prediction"
+                  ],
+                  "description": "Metric name.",
+                  "examples": [
+                    "linear_regression"
+                  ]
+                },
+                "description": "Metrics computed, in canonical order.",
+                "examples": [
+                  [
+                    "linear_regression",
+                    "normal_distribution",
+                    "p_values",
+                    "prediction"
+                  ]
+                ]
+              },
+              "linear_regression": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "slope": {
+                    "type": "number",
+                    "description": "OLS slope.",
+                    "examples": [
+                      1.98
+                    ]
+                  },
+                  "intercept": {
+                    "type": "number",
+                    "description": "OLS intercept.",
+                    "examples": [
+                      0.08
+                    ]
+                  },
+                  "r": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "Pearson correlation; null when y is constant.",
+                    "examples": [
+                      0.998
+                    ]
+                  },
+                  "r_squared": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "Coefficient of determination; null when y is constant.",
+                    "examples": [
+                      0.996
+                    ]
+                  },
+                  "adjusted_r_squared": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "R^2 adjusted for degrees of freedom.",
+                    "examples": [
+                      0.995
+                    ]
+                  },
+                  "slope_std_error": {
+                    "type": "number",
+                    "description": "Standard error of the slope.",
+                    "examples": [
+                      0.071
+                    ]
+                  },
+                  "intercept_std_error": {
+                    "type": "number",
+                    "description": "Standard error of the intercept.",
+                    "examples": [
+                      0.236
+                    ]
+                  },
+                  "residual_std_error": {
+                    "type": "number",
+                    "description": "Standard error of the residuals, sqrt(SSE / df).",
+                    "examples": [
+                      0.225
+                    ]
+                  },
+                  "degrees_of_freedom": {
+                    "type": "integer",
+                    "description": "n - 2.",
+                    "examples": [
+                      3
+                    ]
+                  },
+                  "slope_t": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "t statistic of the slope; null when undefined.",
+                    "examples": [
+                      27.8
+                    ]
+                  },
+                  "intercept_t": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "t statistic of the intercept; null when undefined.",
+                    "examples": [
+                      0.34
+                    ]
+                  },
+                  "t_critical": {
+                    "type": "number",
+                    "description": "Two-sided t critical value at alpha with df degrees of freedom.",
+                    "examples": [
+                      3.18
+                    ]
+                  },
+                  "slope_ci": {
+                    "type": "array",
+                    "items": {
+                      "type": "number",
+                      "description": "Bound.",
+                      "examples": [
+                        0.0
+                      ]
+                    },
+                    "description": "Lower and upper bound at the confidence level.",
+                    "examples": [
+                      [
+                        1.43,
+                        2.53
+                      ]
+                    ]
+                  },
+                  "intercept_ci": {
+                    "type": "array",
+                    "items": {
+                      "type": "number",
+                      "description": "Bound.",
+                      "examples": [
+                        0.0
+                      ]
+                    },
+                    "description": "Lower and upper bound at the confidence level.",
+                    "examples": [
+                      [
+                        1.43,
+                        2.53
+                      ]
+                    ]
+                  },
+                  "f_statistic": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "F statistic of the regression (t^2); null when undefined.",
+                    "examples": [
+                      773.0
+                    ]
+                  },
+                  "sse": {
+                    "type": "number",
+                    "description": "Sum of squared residuals.",
+                    "examples": [
+                      0.152
+                    ]
+                  },
+                  "sst": {
+                    "type": "number",
+                    "description": "Total sum of squares of y.",
+                    "examples": [
+                      39.4
+                    ]
+                  },
+                  "x_mean": {
+                    "type": "number",
+                    "description": "Mean of x.",
+                    "examples": [
+                      3.0
+                    ]
+                  },
+                  "y_mean": {
+                    "type": "number",
+                    "description": "Mean of y.",
+                    "examples": [
+                      6.02
+                    ]
+                  }
+                },
+                "required": [
+                  "slope",
+                  "intercept",
+                  "r",
+                  "r_squared",
+                  "adjusted_r_squared",
+                  "slope_std_error",
+                  "intercept_std_error",
+                  "residual_std_error",
+                  "degrees_of_freedom",
+                  "slope_t",
+                  "intercept_t",
+                  "t_critical",
+                  "slope_ci",
+                  "intercept_ci",
+                  "f_statistic",
+                  "sse",
+                  "sst",
+                  "x_mean",
+                  "y_mean"
+                ],
+                "description": "Ordinary least squares fit of y on x; null when not requested."
+              },
+              "normal_distribution": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "of": {
+                    "type": "string",
+                    "enum": [
+                      "y",
+                      "x",
+                      "residuals"
+                    ],
+                    "description": "Which values the model fits.",
+                    "examples": [
+                      "y"
+                    ]
+                  },
+                  "mean": {
+                    "type": "number",
+                    "description": "Sample mean.",
+                    "examples": [
+                      6.02
+                    ]
+                  },
+                  "std_dev": {
+                    "type": "number",
+                    "description": "Sample standard deviation (n - 1).",
+                    "examples": [
+                      3.14
+                    ]
+                  },
+                  "variance": {
+                    "type": "number",
+                    "description": "Sample variance (n - 1).",
+                    "examples": [
+                      9.86
+                    ]
+                  },
+                  "min": {
+                    "type": "number",
+                    "description": "Smallest value.",
+                    "examples": [
+                      2.1
+                    ]
+                  },
+                  "max": {
+                    "type": "number",
+                    "description": "Largest value.",
+                    "examples": [
+                      10.1
+                    ]
+                  },
+                  "median": {
+                    "type": "number",
+                    "description": "Median of the values.",
+                    "examples": [
+                      6.2
+                    ]
+                  },
+                  "skewness": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "Sample skewness; null when the values are constant.",
+                    "examples": [
+                      0.05
+                    ]
+                  },
+                  "excess_kurtosis": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "description": "Excess kurtosis; null when the values are constant.",
+                    "examples": [
+                      -1.3
+                    ]
+                  },
+                  "quantiles": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "description": "Quantiles of the fitted normal; null when degenerate.",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "p": {
+                          "type": "number",
+                          "description": "Probability.",
+                          "examples": [
+                            0.95
+                          ]
+                        },
+                        "value": {
+                          "type": "number",
+                          "description": "Value at that quantile.",
+                          "examples": [
+                            11.19
+                          ]
+                        }
+                      },
+                      "required": [
+                        "p",
+                        "value"
+                      ]
+                    }
+                  },
+                  "probabilities": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "query": {
+                          "description": "The query as sent.",
+                          "type": [
+                            "object"
+                          ],
+                          "examples": [
+                            {
+                              "below": 8.0
+                            }
+                          ]
+                        },
+                        "probability": {
+                          "type": "number",
+                          "description": "Probability under the fitted normal.",
+                          "examples": [
+                            0.736
+                          ]
+                        }
+                      },
+                      "required": [
+                        "query",
+                        "probability"
+                      ]
+                    },
+                    "description": "Answers to probability_queries, in order.",
+                    "examples": [
+                      [
+                        {
+                          "query": {
+                            "below": 8.0
+                          },
+                          "probability": 0.736
+                        }
+                      ]
+                    ]
+                  },
+                  "normality": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "description": "Jarque-Bera normality test; null when the values are constant.",
+                    "properties": {
+                      "test": {
+                        "type": "string",
+                        "const": "jarque_bera",
+                        "description": "The test."
+                      },
+                      "statistic": {
+                        "type": "number",
+                        "description": "Jarque-Bera statistic.",
+                        "examples": [
+                          0.42
+                        ]
+                      },
+                      "p_value": {
+                        "type": "number",
+                        "description": "Chi-square(2) p-value, exp(-JB/2).",
+                        "examples": [
+                          0.81
+                        ]
+                      },
+                      "null_hypothesis": {
+                        "type": "string",
+                        "description": "What the test rejects.",
+                        "examples": [
+                          "the values are normally distributed"
+                        ]
+                      },
+                      "reject_at_alpha": {
+                        "type": "boolean",
+                        "description": "p_value < alpha: not normal at this alpha.",
+                        "examples": [
+                          false
+                        ]
+                      }
+                    },
+                    "required": [
+                      "test",
+                      "statistic",
+                      "p_value",
+                      "null_hypothesis",
+                      "reject_at_alpha"
+                    ]
+                  }
+                },
+                "required": [
+                  "of",
+                  "mean",
+                  "std_dev",
+                  "variance",
+                  "min",
+                  "max",
+                  "median",
+                  "skewness",
+                  "excess_kurtosis",
+                  "quantiles",
+                  "probabilities",
+                  "normality"
+                ],
+                "description": "Normal model of the chosen values; null when not requested."
+              },
+              "p_values": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "slope": {
+                    "type": "object",
+                    "properties": {
+                      "null_hypothesis": {
+                        "type": "string",
+                        "description": "What the test rejects.",
+                        "examples": [
+                          "slope = 0 (no linear relationship)"
+                        ]
+                      },
+                      "t": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Student t statistic; null when undefined (a perfect fit).",
+                        "examples": [
+                          11.4
+                        ]
+                      },
+                      "p_value": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Two-sided p-value; null when undefined.",
+                        "examples": [
+                          0.0015
+                        ]
+                      },
+                      "significant_at_alpha": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ],
+                        "description": "p_value < alpha.",
+                        "examples": [
+                          true
+                        ]
+                      }
+                    },
+                    "required": [
+                      "null_hypothesis",
+                      "t",
+                      "p_value",
+                      "significant_at_alpha"
+                    ],
+                    "description": "One two-sided Student t test."
+                  },
+                  "intercept": {
+                    "type": "object",
+                    "properties": {
+                      "null_hypothesis": {
+                        "type": "string",
+                        "description": "What the test rejects.",
+                        "examples": [
+                          "slope = 0 (no linear relationship)"
+                        ]
+                      },
+                      "t": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Student t statistic; null when undefined (a perfect fit).",
+                        "examples": [
+                          11.4
+                        ]
+                      },
+                      "p_value": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Two-sided p-value; null when undefined.",
+                        "examples": [
+                          0.0015
+                        ]
+                      },
+                      "significant_at_alpha": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ],
+                        "description": "p_value < alpha.",
+                        "examples": [
+                          true
+                        ]
+                      }
+                    },
+                    "required": [
+                      "null_hypothesis",
+                      "t",
+                      "p_value",
+                      "significant_at_alpha"
+                    ],
+                    "description": "One two-sided Student t test."
+                  },
+                  "normality_of_residuals": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "description": "Jarque-Bera normality test; null when the values are constant.",
+                    "properties": {
+                      "test": {
+                        "type": "string",
+                        "const": "jarque_bera",
+                        "description": "The test."
+                      },
+                      "statistic": {
+                        "type": "number",
+                        "description": "Jarque-Bera statistic.",
+                        "examples": [
+                          0.42
+                        ]
+                      },
+                      "p_value": {
+                        "type": "number",
+                        "description": "Chi-square(2) p-value, exp(-JB/2).",
+                        "examples": [
+                          0.81
+                        ]
+                      },
+                      "null_hypothesis": {
+                        "type": "string",
+                        "description": "What the test rejects.",
+                        "examples": [
+                          "the values are normally distributed"
+                        ]
+                      },
+                      "reject_at_alpha": {
+                        "type": "boolean",
+                        "description": "p_value < alpha: not normal at this alpha.",
+                        "examples": [
+                          false
+                        ]
+                      }
+                    },
+                    "required": [
+                      "test",
+                      "statistic",
+                      "p_value",
+                      "null_hypothesis",
+                      "reject_at_alpha"
+                    ]
+                  }
+                },
+                "required": [
+                  "slope",
+                  "intercept",
+                  "normality_of_residuals"
+                ],
+                "description": "Hypothesis tests validated at alpha; null when not requested."
+              },
+              "prediction": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "description": "One entry per predict_x; null when not requested.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number",
+                      "description": "The x asked for.",
+                      "examples": [
+                        6.0
+                      ]
+                    },
+                    "y_hat": {
+                      "type": "number",
+                      "description": "Predicted y.",
+                      "examples": [
+                        11.96
+                      ]
+                    },
+                    "mean_ci": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "description": "Bound.",
+                        "examples": [
+                          0.0
+                        ]
+                      },
+                      "description": "Lower and upper bound at the confidence level.",
+                      "examples": [
+                        [
+                          1.43,
+                          2.53
+                        ]
+                      ]
+                    },
+                    "prediction_interval": {
+                      "type": "array",
+                      "items": {
+                        "type": "number",
+                        "description": "Bound.",
+                        "examples": [
+                          0.0
+                        ]
+                      },
+                      "description": "Lower and upper bound at the confidence level.",
+                      "examples": [
+                        [
+                          1.43,
+                          2.53
+                        ]
+                      ]
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y_hat",
+                    "mean_ci",
+                    "prediction_interval"
+                  ]
+                }
+              },
+              "notes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "description": "A caveat about a degenerate input.",
+                  "examples": [
+                    "The points lie exactly on a line."
+                  ]
+                },
+                "description": "Caveats about the input; empty when there are none.",
+                "examples": [
+                  []
+                ]
+              },
+              "method": {
+                "type": "string",
+                "description": "How the numbers were produced.",
+                "examples": [
+                  "Ordinary least squares (closed form). Student t p-values from the regularised incomplete beta function..."
+                ]
+              }
+            },
+            "required": [
+              "source",
+              "n",
+              "alpha",
+              "confidence_level",
+              "metrics",
+              "linear_regression",
+              "normal_distribution",
+              "p_values",
+              "prediction",
+              "notes",
+              "method"
+            ]
+          },
+          "provenance": {
+            "type": "object",
+            "properties": {
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "step": {
+                      "type": "string",
+                      "description": "Step name inside the worker.",
+                      "examples": [
+                        "quote"
+                      ]
+                    },
+                    "ok": {
+                      "type": "boolean",
+                      "description": "Whether the step succeeded.",
+                      "examples": [
+                        true
+                      ]
+                    },
+                    "provider": {
+                      "type": "string",
+                      "description": "Provider that served the step.",
+                      "examples": [
+                        "coinbase-advanced-trade-public"
+                      ]
+                    },
+                    "ms": {
+                      "type": "integer",
+                      "description": "Milliseconds the step took.",
+                      "examples": [
+                        312
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "description": "Failure reason, on a failed step.",
+                      "examples": [
+                        "provider_timeout"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "step",
+                    "ok",
+                    "ms"
+                  ],
+                  "description": "One step of the job."
+                },
+                "description": "Every step the job ran, in order."
+              },
+              "providers_used": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "description": "Provider name.",
+                  "examples": [
+                    "coinbase-advanced-trade-public"
+                  ]
+                },
+                "description": "Providers that served the job.",
+                "examples": [
+                  [
+                    "coinbase-advanced-trade-public"
+                  ]
+                ]
+              },
+              "attempts": {
+                "type": "integer",
+                "description": "Provider attempts made, including retries and failovers.",
+                "examples": [
+                  1
+                ]
+              },
+              "elapsed_ms": {
+                "type": "integer",
+                "description": "Wall-clock milliseconds for the whole job.",
+                "examples": [
+                  340
+                ]
+              }
+            },
+            "required": [
+              "steps",
+              "providers_used",
+              "attempts",
+              "elapsed_ms"
+            ],
+            "description": "How the result was produced: which providers ran and how long each took."
+          },
+          "receipt_id": {
+            "type": "string",
+            "description": "Receipt id for this job.",
+            "examples": [
+              "rcpt_9f1c2b3a4d5e6f70"
+            ]
+          },
+          "receipt_url": {
+            "type": "string",
+            "description": "Where to fetch the machine-readable receipt (free, no payment).",
+            "examples": [
+              "/work/receipts/rcpt_9f1c2b3a4d5e6f70"
+            ]
+          },
+          "billing_warning": {
+            "type": "string",
+            "description": "Present only when the charge was recorded with a caveat.",
+            "examples": [
+              "settlement pending"
+            ]
+          }
+        },
+        "title": "stats.probability response"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "title": "Predictive probability engine: regression, normal model, p-values"
+      },
+      "httpEndpoint": {
+        "method": "POST",
+        "path": "/work/stats/probability",
+        "price_usd": 0.5
+      }
+    }
   ]
 }
