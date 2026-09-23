@@ -1990,19 +1990,28 @@ def _openapi_with_payment_info() -> dict:
         offers = list(
             mpp_payments.discovery_offers(entry["price_usd"], description=entry["description"])
         )
+        protocols = ["mpp"] if offers else []
         # The x402 rail, too. On an x402-only deploy the MPP offers are empty
         # and every paid route used to read as free here while the 402,
         # agent.json, llms.txt and mcp.json all priced it.
         x402_offer = x402_payments.discovery_offer(f"${entry['price_usd']:.2f}")
         if x402_offer:
             offers.append(x402_offer)
+            protocols.insert(0, "x402")
         if not offers:
             continue
         for path in (entry["path"], *reverse_aliases.get(entry["path"], [])):
             operation = doc.get("paths", {}).get(path, {}).get("post")
             if operation is None:
                 continue
-            operation["x-payment-info"] = {"offers": offers}
+            operation["x-payment-info"] = {
+                "offers": offers,
+                # x402scan's OpenAPI discovery reads these two (its
+                # docs/DISCOVERY.md); mppx ignores fields next to `offers`.
+                "protocols": protocols,
+                "price": {"mode": "fixed", "currency": "USD",
+                          "amount": f"{entry['price_usd']:.2f}"},
+            }
             if entry.get("buyer_note"):
                 # Workers above the x402 clients' $1 default cap: see
                 # workers.catalog.buyer_note. A standard extension key, kept
@@ -2136,6 +2145,24 @@ async def ard_manifest():
         workers_catalog=(workers.catalog if workers is not None and workers.is_configured() else None),
         worker_contract=(workers.catalog.contract if workers is not None else None),
     )
+
+
+@app.get("/.well-known/x402", tags=["discovery"])
+async def x402_discovery():
+    """x402scan's discovery fan-out: `{"version": 1, "resources": [...]}`.
+
+    Every paid route, full URL -- the same set openapi.json marks with
+    x-payment-info, so the two can never disagree. Aliases are left out.
+    """
+    paths = app.openapi().get("paths", {})
+    return {
+        "version": 1,
+        "resources": [
+            f"{PUBLIC_BASE_URL}{path}"
+            for path, item in paths.items()
+            if "x-payment-info" in (item.get("post") or {}) and path not in _CATALOG_ALIASES
+        ],
+    }
 
 
 @app.get("/.well-known/agent.json", tags=["discovery"])

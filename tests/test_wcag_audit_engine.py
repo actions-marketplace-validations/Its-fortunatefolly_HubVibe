@@ -862,6 +862,11 @@ def test_openapi_marks_every_paid_route_with_x_payment_info(monkeypatch):
     bundle = doc["paths"]["/audit/bundle"]["post"]["x-payment-info"]["offers"]
     assert bundle[0]["amount"] == "150000"  # $0.15 in USDC base units
 
+    # x402scan reads `protocols` and a fixed USD `price` from the same object.
+    info = doc["paths"]["/audit/bundle"]["post"]["x-payment-info"]
+    assert "mpp" in info["protocols"]
+    assert info["price"] == {"mode": "fixed", "currency": "USD", "amount": "0.15"}
+
     assert "docs" in doc["x-service-info"]
 
 
@@ -875,6 +880,23 @@ def test_openapi_carries_no_x_payment_info_when_no_mpp_rail_exists(monkeypatch):
     for path_item in doc["paths"].values():
         for operation in path_item.values():
             assert "x-payment-info" not in operation
+
+
+def test_well_known_x402_lists_exactly_the_paid_routes(monkeypatch):
+    """x402scan fans out from /.well-known/x402; it must list the routes
+    openapi.json marks as paid, as full URLs, and nothing when none is."""
+    from fastapi.testclient import TestClient
+
+    module, doc = _openapi_with_tempo(monkeypatch)
+    client = TestClient(module.app)
+    body = client.get("/.well-known/x402").json()
+    assert body["version"] == 1
+    expected = {f"{module.PUBLIC_BASE_URL}{e['path']}" for e in module._CATALOG}
+    assert expected <= set(body["resources"])
+    assert f"{module.PUBLIC_BASE_URL}/audit" not in body["resources"]
+
+    monkeypatch.setattr(module.mpp_payments, "tempo_configured", lambda: False)
+    assert client.get("/.well-known/x402").json()["resources"] == []
 
 
 def test_openapi_annotation_follows_a_rail_change(monkeypatch):
