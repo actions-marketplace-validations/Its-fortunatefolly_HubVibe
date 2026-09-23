@@ -18,7 +18,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 try:
-    from . import ard, audits, billing, browser_pool, mpp_payments, x402_payments
+    from . import (ard, audits, billing, browser_pool, mpp_payments,
+                   solana_hash_verifier, x402_payments)
 except ImportError:
     # Loaded directly by file path (e.g. by tooling/tests) rather than as
     # part of the `app` package -- fall back to loading each sibling module
@@ -53,6 +54,7 @@ except ImportError:
     mpp_payments = _load_sibling_module("mpp_payments")  # type: ignore
     x402_payments = _load_sibling_module("x402_payments")  # type: ignore
     ard = _load_sibling_module("ard")  # type: ignore
+    solana_hash_verifier = _load_sibling_module("solana_hash_verifier")  # type: ignore
 
 # The worker network: additional machine-payable capabilities that run BESIDE
 # the audits. Kept in its own import block so the audit imports above are
@@ -2193,6 +2195,8 @@ async def agent_manifest(request: Request):
                 "for you). HTTP headers X-PAYMENT / PAYMENT-SIGNATURE / "
                 "X-API-Key on the POST work too."
             ),
+            **({"solana_topup": _solana_topup_manifest(base)}
+               if solana_hash_verifier.configured() else {}),
         },
         "limits": {
             "rate_limit_per_minute": RATE_LIMIT_PER_MINUTE,
@@ -3293,6 +3297,103 @@ def _mcp_payment_required(request_id, name: str, price: float, err: JSONResponse
             "isError": True,
         },
     }
+
+
+# --- Solana hash top-up: a USDC transfer on Solana buys a prepaid key --------
+# The wallet that cannot sign an x402 payload can still pay: it sends USDC
+# itself and redeems the transaction. All verification, the replay ledger and
+# the key minting live in solana_hash_verifier.py; these two routes only
+# parse, rate-limit and map its standard payload onto HTTP statuses.
+
+
+def _solana_topup_manifest(base: str) -> dict:
+    low, high = solana_hash_verifier.limits_atomic()
+    return {
+        "what": (
+            "Buy a prepaid X-API-Key with a USDC transfer on Solana mainnet, from "
+            "any wallet that can send SPL tokens -- no x402 signature involved."),
+        "challenge": f"{base}/pay/solana/challenge",
+        "redeem": f"{base}/pay/solana/redeem",
+        "flow": (
+            "1) POST /pay/solana/challenge {\"amount_usd\": 5} -> reference and "
+            "challenge_token (keep the token private). 2) Send at least that USDC on "
+            "Solana mainnet to pay_to, carrying the reference as a read-only account "
+            "key (Solana Pay) or an SPL Memo `hubvibe:<reference>`, before expires_at. "
+            "3) After finality (~15 s) POST /pay/solana/redeem {\"tx_signature\", "
+            "\"challenge_token\"} -> api_key worth what arrived, to the cent. Send it "
+            "as the X-API-Key header on any paid route."),
+        "limits_usd": [low / 1_000_000, high / 1_000_000],
+        "network": solana_hash_verifier.NETWORK,
+        "asset": solana_hash_verifier.USDC_MINT,
+    }
+
+
+def _solana_hash_http(payload: dict) -> JSONResponse:
+    if payload.get("status") == "ok":
+        return JSONResponse(status_code=200, content=payload)
+    reason = payload.get("reason")
+    if reason == "not_configured":
+        return JSONResponse(status_code=503, content=payload)
+    if payload.get("retryable"):
+        return JSONResponse(status_code=503, content=payload, headers={"Retry-After": "5"})
+    if reason in ("signature_already_redeemed", "challenge_already_redeemed", "claim_stuck"):
+        return JSONResponse(status_code=409, content=payload)
+    return JSONResponse(status_code=400, content=payload)
+
+
+async def _json_object(request: Request) -> Optional[dict]:
+    try:
+        body = await request.json()
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+@app.post("/pay/solana/challenge", tags=["billing"])
+async def solana_topup_challenge(request: Request):
+    """Start a Solana USDC top-up: a reference to carry in the transfer and
+    the private token that alone can redeem it. Free; nothing is charged."""
+    if not _audit_limiter.check(_client_ip(request)):
+        return _rate_limited_response()
+    body = await _json_object(request)
+    if body is None:
+        return JSONResponse(status_code=400, content={
+            "status": "error", "reason": "invalid_request", "retryable": False,
+            "credited": False, "detail": "Body must be a JSON object: {\"amount_usd\": 5}."})
+    amount = body.get("amount_atomic")
+    if amount is None and body.get("amount_usd") is not None:
+        from decimal import Decimal, InvalidOperation
+
+        try:
+            atomic = Decimal(str(body["amount_usd"])) * 1_000_000
+        except (InvalidOperation, ValueError):
+            atomic = None
+        # Exactly representable in USDC's 6 decimals, or refused: a rounded
+        # amount would ask the payer for something they did not agree to.
+        amount = int(atomic) if atomic is not None and atomic == atomic.to_integral_value() \
+            and not isinstance(body["amount_usd"], bool) else "invalid"
+    return _solana_hash_http(solana_hash_verifier.issue_challenge(amount))
+
+
+@app.post("/pay/solana/redeem", tags=["billing"])
+async def solana_topup_redeem(request: Request):
+    """Redeem a finalized Solana USDC transfer carrying a challenge's
+    reference for a prepaid X-API-Key. Idempotent for the token's holder:
+    the same signature and token return the same key again."""
+    if not _audit_limiter.check(_client_ip(request)):
+        return _rate_limited_response()
+    body = await _json_object(request)
+    if body is None:
+        return JSONResponse(status_code=400, content={
+            "status": "error", "reason": "invalid_request", "retryable": False,
+            "credited": False,
+            "detail": "Body must be a JSON object: {\"tx_signature\": ..., \"challenge_token\": ...}."})
+    import asyncio
+
+    # Blocking RPC and SQLite: off the loop, and off the two-slot audit pool.
+    payload = await asyncio.get_running_loop().run_in_executor(
+        None, solana_hash_verifier.redeem, body.get("tx_signature"), body.get("challenge_token"))
+    return _solana_hash_http(payload)
 
 
 @app.post("/billing/checkout")

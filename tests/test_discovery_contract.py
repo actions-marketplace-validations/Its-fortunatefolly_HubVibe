@@ -377,3 +377,83 @@ def test_an_audit_402s_bazaar_record_shows_the_real_audit_response(client, app_m
         _validator(schema).validate(example)
         recorded = challenge.extensions["bazaar"]["schema"]["properties"]["output"]["properties"]
         assert recorded["example"].get("required") or recorded["example"].get("properties"), path
+
+
+# --- what Coinbase's facilitator accepts: description <=500, formats honoured --
+
+def _cdp_format_checker():
+    """jsonschema's `uri` check needs an optional package; this is the same
+    rule stated directly, so the test cannot pass by silently skipping it."""
+    from urllib.parse import urlparse
+    checker = jsonschema.FormatChecker()
+
+    @checker.checks("uri")
+    def _uri(value):
+        if not isinstance(value, str):
+            return True
+        parts = urlparse(value)
+        return bool(parts.scheme and (parts.netloc or parts.path))
+
+    return checker
+
+
+def _all_paid_paths():
+    return [w.path for w in W.catalog.live()] + [
+        "/audit/wcag", "/audit/seo", "/audit/security", "/audit/performance", "/audit/bundle"]
+
+
+def test_every_402_description_fits_coinbases_500_char_limit(client):
+    """CDP's API schema: resource.description is maxLength 500. At 572 chars
+    /work/stats/probability failed verify on every payment with "'paymentPayload'
+    is invalid: must match one of [x402V2PaymentPayload, x402V1PaymentPayload]"."""
+    for path in _all_paid_paths():
+        body = {"url": "https://example.com"} if path.startswith("/audit") else {}
+        response = client.post(path, json=body)
+        assert len(_v2_resource(response).description or "") <= 500, path
+        for entry in response.json().get("accepts", []):
+            assert len(entry.get("description") or "") <= 500, path
+
+
+def test_the_probability_route_is_payable_through_coinbase(client):
+    resource = _v2_resource(client.post("/work/stats/probability", json={}))
+    assert 0 < len(resource.description) <= 500
+    assert resource.description.startswith("Deterministic statistics")
+
+
+def test_the_mcp_paywall_description_fits_the_limit_too(client):
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "hubvibe_predictive_probability_engine",
+                          "arguments": {"points": [[1, 2], [2, 4], [3, 6]]}}}
+    text = client.post("/mcp", json=payload).text
+    match = re.search(r'"resource":\s*\{[^{}]*?"description":\s*"((?:[^"\\]|\\.)*)"', text)
+    assert match, text[:300]
+    assert len(json.loads('"%s"' % match.group(1))) <= 500
+
+
+def test_fit_description_cuts_at_a_sentence_and_leaves_short_text_alone():
+    x = app_x402()
+    assert x.fit_description("Short.") == "Short."
+    assert x.fit_description(None) is None
+    long = ("First sentence is here. " * 30).strip()
+    cut = x.fit_description(long)
+    assert len(cut) <= 500 and cut.endswith(".")
+    one_run = "word " * 200
+    cut = x.fit_description(one_run)
+    assert len(cut) <= 500 and cut.endswith("...")
+    for worker in W.catalog.CATALOG:
+        assert len(x.fit_description(worker.description)) <= 500, worker.name
+
+
+def test_every_bazaar_example_satisfies_its_declared_formats(client):
+    """The WCAG and bundle records carried help_url "example" under
+    `format: uri`: valid to a lenient validator, invalid to a strict one, and
+    Coinbase kept its old rows for exactly those two audits."""
+    checker = _cdp_format_checker()
+    for path in _all_paid_paths():
+        body = {"url": "https://example.com"} if path.startswith("/audit") else {}
+        from x402.http.utils import decode_payment_required_header
+        raw = client.post(path, json=body).headers.get("payment-required")
+        ext = decode_payment_required_header(raw).extensions["bazaar"]
+        cls = jsonschema.validators.validator_for(ext["schema"])
+        errors = list(cls(ext["schema"], format_checker=checker).iter_errors(ext["info"]))
+        assert not errors, (path, [e.message for e in errors[:3]])

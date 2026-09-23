@@ -74,6 +74,18 @@ costs a real browser page load, so every audit is paid for.
 
 - POST /audit -- $0.05 -- Alias of /audit/wcag, kept for backward compatibility.
 
+## Prepaid key over Solana (no x402 signature needed)
+
+A wallet that can send SPL tokens but cannot sign x402 payloads can buy a
+prepaid X-API-Key with a plain USDC transfer on Solana mainnet:
+1. POST /pay/solana/challenge {"amount_usd": 5} -> reference + challenge_token
+   (keep the token private; $0.50-$100).
+2. Send at least that much USDC to pay_to, with the reference as a read-only
+   account key (Solana Pay) or an SPL Memo `hubvibe:<reference>`.
+3. After finality (~15 s) POST /pay/solana/redeem {"tx_signature", "challenge_token"}
+   -> api_key credited with what arrived, to the cent. Send it as X-API-Key.
+Only the token's holder can redeem; each transfer and each challenge redeems once.
+
 ## Worker network (/work/*) -- completed work
 
 Priced per call on the same HTTP 402 rail as the audits. GET /work (free)

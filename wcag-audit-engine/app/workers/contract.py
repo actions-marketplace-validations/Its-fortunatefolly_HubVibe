@@ -714,6 +714,22 @@ def response_schema(worker) -> dict:
 
 # --- examples generated FROM the schemas, so they cannot drift ----------------
 
+_FORMAT_EXAMPLES = {
+    "uri": "https://example.com",
+    "url": "https://example.com",
+    "uri-reference": "https://example.com",
+    "iri": "https://example.com",
+    "email": "agent@example.com",
+    "date": "2026-01-01",
+    "date-time": "2026-01-01T00:00:00Z",
+    "time": "00:00:00Z",
+    "hostname": "example.com",
+    "ipv4": "192.0.2.1",
+    "ipv6": "2001:db8::1",
+    "uuid": "00000000-0000-4000-8000-000000000000",
+}
+
+
 def example_from_schema(schema: dict) -> Any:
     """A value that satisfies `schema`, preferring the `examples` it carries."""
     if "examples" in schema and schema["examples"]:
@@ -732,7 +748,10 @@ def example_from_schema(schema: dict) -> Any:
         items = schema.get("items") or {}
         return [example_from_schema(items)] if items else []
     if kind == "string":
-        return "example"
+        # A strict validator checks `format`: the word "example" in a field
+        # declared a URI made the audit records invalid to Coinbase's index,
+        # which kept the old rows for /audit/wcag and /audit/bundle.
+        return _FORMAT_EXAMPLES.get(schema.get("format"), "example")
     if kind == "integer":
         return 0
     if kind == "number":

@@ -814,6 +814,27 @@ _TAG_LIMIT = 5
 _TAG_MAX_CHARS = 32
 
 
+# Coinbase's facilitator validates the payment payload against its own API
+# schema, where `resource.description` is `maxLength: 500`. A longer one fails
+# the whole payload ("must match one of [x402V2PaymentPayload, ...]") at
+# verify, so no buyer could pay that route through Coinbase at all:
+# /work/stats/probability (572 chars) was refused on every attempt.
+_DESCRIPTION_MAX_CHARS = 500
+
+
+def fit_description(text: Optional[str]) -> Optional[str]:
+    """`text` cut to at most 500 chars at a sentence (else word) boundary.
+    The full text still lives in the catalog, openapi.json and agent.json."""
+    if not text or len(text) <= _DESCRIPTION_MAX_CHARS:
+        return text
+    cut = text[:_DESCRIPTION_MAX_CHARS]
+    end = cut.rfind(". ")
+    if end >= 200:
+        return cut[: end + 1]
+    space = cut[: _DESCRIPTION_MAX_CHARS - 3].rfind(" ")
+    return cut[: space if space > 0 else _DESCRIPTION_MAX_CHARS - 3].rstrip(" ,;:") + "..."
+
+
 def bazaar_tags(tags=None) -> list:
     """The tag list the Bazaar will accept: at most 5, each printable ASCII
     of at most 32 chars, in the order given. Anything that would fail the
@@ -894,7 +915,7 @@ def accepts_entry(price: Optional[str] = None, resource_url: Optional[str] = Non
         "network": network,
         "maxAmountRequired": priced.amount,
         "resource": resource_url or "",
-        "description": description or "HubVibe site audit",
+        "description": fit_description(description) or "HubVibe site audit",
         "mimeType": "application/json",
         "payTo": _PAY_TO_ADDRESS,
         "maxTimeoutSeconds": _MAX_TIMEOUT_SECONDS,
@@ -1129,7 +1150,7 @@ def payment_required_v2(
             error=error or "payment_required",
             resource=ResourceInfo(
                 url=resource_url or "",
-                description=description or "HubVibe site audit",
+                description=fit_description(description) or "HubVibe site audit",
                 mimeType="application/json",
                 serviceName=_SERVICE_NAME,
                 # This route's own tags (a worker's catalog tags), or the
