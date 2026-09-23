@@ -290,3 +290,34 @@ def test_errors_are_json_and_carry_no_local_paths(router, node):
     body = info.value.as_json()
     assert body["status"] == "error" and body["reason"] == "payment_refused"
     assert "/home/" not in json.dumps(body) and "home" not in body
+
+
+# --- the copyable shape: HubVibeRouter(endpoint=, wallet_type=).execute_task(tool=, payload=) ---
+
+def test_tool_names_resolve_to_routes():
+    f = R.Router.route_for
+    assert f("stats.probability") == "/work/stats/probability"
+    assert f("market.quote") == "/work/market/quote"
+    assert f("research.page_facts") == "/work/research/page_facts"
+    assert f("audit.wcag") == "/audit/wcag" and f("bundle") == "/audit/bundle"
+    assert f("/work/llm/generate") == "/work/llm/generate" and f("/audit/seo") == "/audit/seo"
+
+
+def test_the_copyable_client_executes_a_task_by_tool_name(node, tmp_path, monkeypatch):
+    monkeypatch.setenv("HUBVIBE_WALLET_KEY", "0x" + "2" * 64)
+    monkeypatch.setenv("HUBVIBE_HOME", str(tmp_path / "home"))
+    client = R.HubVibeRouter(endpoint=node.url, wallet_type="base")
+    monkeypatch.setattr(client, "_sign", lambda resp, url: {"PAYMENT-SIGNATURE": "s"})
+    response = client.execute_task(tool="market.quote", payload={"product_id": "BTC-USD"})
+    assert response["status"] == "ok" and response["worker"] == "market.quote"
+    assert response["result"]["echo"] == {"product_id": "BTC-USD"} and response["price_usd"] == 0.02
+    assert client.rail == "base" and client.spent_usd == 0.02
+
+
+def test_the_copyable_client_picks_the_solana_rail_by_wallet_type(tmp_path, monkeypatch):
+    monkeypatch.setenv("HUBVIBE_SOLANA_KEY", "not-a-real-key")
+    monkeypatch.setenv("HUBVIBE_HOME", str(tmp_path / "home"))
+    client = R.HubVibeRouter(endpoint="http://127.0.0.1:9", wallet_type="solana")
+    assert client.rail == "solana"
+    with pytest.raises(R.NotConfigured):
+        R.HubVibeRouter(endpoint="http://127.0.0.1:9", wallet_type="ethereum")

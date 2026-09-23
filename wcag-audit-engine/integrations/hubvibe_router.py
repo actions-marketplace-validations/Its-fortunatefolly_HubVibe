@@ -24,7 +24,19 @@ no other host. There is no HubVibe-side proxy in the path.
 
 Two ways to use it
 ------------------
-As a library:
+As a library (copy this; the wallet comes from the environment or from
+the files named below):
+
+    from hubvibe_router import HubVibeRouter
+    client = HubVibeRouter(endpoint="https://hubvibe-io.com", wallet_type="base")
+    response = client.execute_task(tool="stats.probability", payload={...})
+
+`tool` is a catalog name ("stats.probability", "market.quote") or a route
+("/work/stats/probability", "/audit/wcag"); `payload` is the route's JSON
+body. `wallet_type` is "base" or "solana". `response` is the node's
+delivered body: status, worker, price_usd, result, provenance, receipt_url.
+
+The same object under its plain name:
 
     from hubvibe_router import Router
     r = Router.from_env()
@@ -418,6 +430,23 @@ class Router:
             "rails": [a.get("network") for a in (challenge or {}).get("accepts") or []],
         }
 
+    @staticmethod
+    def route_for(tool: str) -> str:
+        """A catalog name or a route, to the route: "stats.probability" ->
+        /work/stats/probability, "audit.wcag" -> /audit/wcag, a path is kept."""
+        tool = tool.strip()
+        if tool.startswith("/"):
+            return tool
+        if tool.startswith("audit."):
+            return "/audit/" + tool.split(".", 1)[1]
+        if tool in ("bundle", "wcag", "seo", "security", "performance"):
+            return "/audit/" + tool
+        return "/work/" + tool.replace(".", "/")
+
+    def execute_task(self, tool: str, payload: Any = None, *, use_cache: bool = True) -> dict:
+        """Buy one job by tool name or route. Same loop as `call`."""
+        return self.call(self.route_for(tool), payload if payload is not None else {}, use_cache=use_cache)
+
     def call(self, path: str, body: Any, *, use_cache: bool = True) -> dict:
         """Buy one job: POST, clear the 402 with the local wallet if needed,
         return the delivered body. Cached analytical results are returned
@@ -494,6 +523,40 @@ class Router:
         except Exception:
             pass
         return " ".join(response.text.split())[:200]
+
+
+class HubVibeRouter(Router):
+    """The copyable client: `HubVibeRouter(endpoint=..., wallet_type="base")`.
+
+    Wallets, caps and cache settings come from the environment (see the
+    module docstring), so an agent's code carries no secrets. `wallet_type`
+    picks the rail: "base" signs USDC on Base with HUBVIBE_WALLET_KEY/FILE,
+    "solana" signs USDC on Solana with HUBVIBE_SOLANA_KEY/FILE.
+    """
+
+    def __init__(self, endpoint: str = "https://hubvibe-io.com", wallet_type: Optional[str] = None,
+                 **overrides: Any):
+        rail = {"base": "base", "evm": "base", "solana": "solana", "svm": "solana", None: None}.get(
+            wallet_type.lower() if isinstance(wallet_type, str) else None, "?")
+        if rail == "?":
+            raise NotConfigured("wallet_type must be 'base' or 'solana'")
+        env = os.environ
+        kwargs: dict = {
+            "base_url": endpoint,
+            "evm_key": _read_secret(env.get("HUBVIBE_WALLET_KEY"), env.get("HUBVIBE_WALLET_FILE"), "~/.hubvibe-wallet-key"),
+            "solana_key": _read_secret(env.get("HUBVIBE_SOLANA_KEY"), env.get("HUBVIBE_SOLANA_FILE"), "~/.hubvibe-solana-key"),
+            "rail": rail or env.get("HUBVIBE_RAIL") or None,
+            "solana_rpc": env.get("HUBVIBE_SOLANA_RPC", "https://api.mainnet-beta.solana.com"),
+            "api_key": env.get("HUBVIBE_API_KEY") or None,
+            "max_price_usd": float(env.get("HUBVIBE_MAX_PRICE_USD", "1.00")),
+            "budget_usd": float(env.get("HUBVIBE_BUDGET_USD", "25.00")),
+            "daily_cap_usd": float(env.get("HUBVIBE_DAILY_CAP_USD", "100.00")),
+            "cache_ttl": int(env.get("HUBVIBE_CACHE_TTL", "86400")),
+            "cache_paths": tuple(p.strip() for p in env.get("HUBVIBE_CACHE_PATHS", ",".join(_DEFAULT_CACHE_PATHS)).split(",") if p.strip()),
+            "home": env.get("HUBVIBE_HOME") or None,
+        }
+        kwargs.update(overrides)
+        super().__init__(**kwargs)
 
 
 # --- local proxy: the agent talks HTTP to 127.0.0.1, the router does the rest --

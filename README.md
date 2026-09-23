@@ -277,6 +277,14 @@ In [`wcag-audit-engine/integrations/`](wcag-audit-engine/integrations/):
   `/work/stats/*`) are cached locally for 24 hours so a loop pays once per
   distinct query. Per-call, per-process and per-day caps refuse before any
   signature exists. `python hubvibe_router.py quote|call|serve|status|ledger`.
+  As a library, an agent copies this (the wallet comes from
+  `HUBVIBE_WALLET_KEY` / `HUBVIBE_SOLANA_KEY` or the key files, never from code):
+
+  ```python
+  from hubvibe_router import HubVibeRouter
+  client = HubVibeRouter(endpoint="https://hubvibe-io.com", wallet_type="base")
+  response = client.execute_task(tool="stats.probability", payload={...})
+  ```
 - **`hubvibe_tollbooth.py`** — the client for agents running unattended. Same
   audits, but it settles the 402 itself from an EVM wallet via x402, so no
   human has to go get a key. Enforces a per-call cap **and** a
