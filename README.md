@@ -269,6 +269,14 @@ In [`wcag-audit-engine/integrations/`](wcag-audit-engine/integrations/):
   so it is deliberately kept out of the service's dependency tree.
 - **`langchain_tool.py`** — LangChain tool wrapper. Subscription key only; it
   raises on a 402 rather than paying.
+- **`hubvibe_router.py`** — the buyer-side gateway, in the shape of BlockRun's
+  ClawRouter: an agent runs it on its own machine, points HTTP calls at
+  `http://127.0.0.1:8402/work/...`, and the router clears each 402 by signing
+  with the agent's own wallet (USDC on Base or on Solana, key never leaves the
+  machine), retries, and returns the result. Analytical routes (`/work/data/*`,
+  `/work/stats/*`) are cached locally for 24 hours so a loop pays once per
+  distinct query. Per-call, per-process and per-day caps refuse before any
+  signature exists. `python hubvibe_router.py quote|call|serve|status|ledger`.
 - **`hubvibe_tollbooth.py`** — the client for agents running unattended. Same
   audits, but it settles the 402 itself from an EVM wallet via x402, so no
   human has to go get a key. Enforces a per-call cap **and** a
