@@ -2109,6 +2109,8 @@ def _payment_methods_live() -> list:
         methods.append("mpp-stripe")
     if mpp_payments.tempo_configured():
         methods.append("mpp-tempo")
+    if mpp_payments.evm_configured():
+        methods.append("mpp-evm")
     if billing.is_configured() and billing.human_plans_live():
         methods.append("stripe_api_key")
     return methods

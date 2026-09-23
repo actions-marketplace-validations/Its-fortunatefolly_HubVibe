@@ -393,7 +393,7 @@ for tool in tools:
     if not tool.get("outputSchema") or not tool.get("annotations"):
         sys.exit(1)
     schema = tool.get("inputSchema") or {}
-    if not (schema.get("required") or schema.get("anyOf")):
+    if not (schema.get("required") or schema.get("anyOf") or schema.get("oneOf")):
         sys.exit(1)
 sys.exit(0)
 ' 2>/dev/null; then
@@ -598,8 +598,12 @@ fi
 echo
 echo "Target URL gate"
 for internal in "http://169.254.169.254/computeMetadata/v1/" "http://127.0.0.1:8080/health" "http://metadata.google.internal/"; do
+  # A call with no credential is priced first, whatever its body (#120), so
+  # the gate is only reached by a call that carries one. Any key will do: the
+  # URL is refused before the key is looked up, and nothing is charged.
   GATE_CODE=$(curl -sS -m 45 -o /dev/null -w '%{http_code}' -X POST "$BASE/audit/wcag" \
-    -H 'Content-Type: application/json' -d "{\"url\":\"$internal\"}" 2>/dev/null)
+    -H 'Content-Type: application/json' -H 'X-API-Key: verify-live-gate-probe' \
+    -d "{\"url\":\"$internal\"}" 2>/dev/null)
   if [ "$GATE_CODE" = "400" ]; then
     pass "refuses to fetch $internal -> 400"
   else

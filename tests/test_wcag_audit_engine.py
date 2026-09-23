@@ -1079,6 +1079,10 @@ def test_manifest_only_lists_payment_methods_that_can_settle(monkeypatch):
     refreshed = client.get("/.well-known/agent.json").json()
     assert "mpp-tempo" in refreshed["payment"]["methods"]
 
+    monkeypatch.setattr(module.mpp_payments, "evm_configured", lambda: True)
+    refreshed = client.get("/.well-known/agent.json").json()
+    assert "mpp-evm" in refreshed["payment"]["methods"]
+
 
 _SIBLING_MODULES = ("billing", "x402_payments", "mpp_payments", "audits")
 
