@@ -801,8 +801,37 @@ _MAX_TIMEOUT_SECONDS = 300
 # Names this service by in the Bazaar. `service_name` and `tags` are the
 # fields an agent shopping the index by capability actually matches on, and
 # the facilitator validates them (printable ASCII, <=32 chars, <=5 tags).
-_SERVICE_NAME = "HubVibe Site Audits"
+#
+# One name for all 43 routes: the index stamped "HubVibe Site Audits" and the
+# five audit tags on every /work challenge too, so a buyer searching the
+# Bazaar for an LLM completion, a web search or a Polymarket read found a
+# row filed under accessibility. `_SERVICE_TAGS` is now only the default a
+# caller gets when it passes no tags of its own -- the audits' tags; every
+# worker route passes its catalog tags.
+_SERVICE_NAME = "HubVibe"
 _SERVICE_TAGS = ["accessibility", "wcag", "seo", "security", "performance"]
+_TAG_LIMIT = 5
+_TAG_MAX_CHARS = 32
+
+
+def bazaar_tags(tags=None) -> list:
+    """The tag list the Bazaar will accept: at most 5, each printable ASCII
+    of at most 32 chars, in the order given. Anything that would fail the
+    facilitator's validation is dropped rather than sent, because an invalid
+    tag list costs the whole discovery record, not just the tag. Empty or
+    None means the audit default."""
+    chosen = []
+    for tag in list(tags or []):
+        if not isinstance(tag, str):
+            continue
+        tag = tag.strip()
+        if not tag or len(tag) > _TAG_MAX_CHARS or not tag.isascii() or not tag.isprintable():
+            continue
+        if tag not in chosen:
+            chosen.append(tag)
+        if len(chosen) == _TAG_LIMIT:
+            break
+    return chosen or list(_SERVICE_TAGS)
 
 
 def _priced_asset(price: str):
@@ -1062,6 +1091,7 @@ def payment_required_v2(
     description: Optional[str] = None,
     extensions: Optional[dict] = None,
     error: Optional[str] = None,
+    tags: Optional[list] = None,
 ):
     """The x402 **v2** challenge as the library's `PaymentRequired` model, or
     None when this node cannot take a v2 payment right now.
@@ -1102,7 +1132,9 @@ def payment_required_v2(
                 description=description or "HubVibe site audit",
                 mimeType="application/json",
                 serviceName=_SERVICE_NAME,
-                tags=list(_SERVICE_TAGS),
+                # This route's own tags (a worker's catalog tags), or the
+                # audit default. What capability search matches on.
+                tags=bazaar_tags(tags),
             ),
             accepts=_v2_accepts(priced, resolved),
             extensions=extensions or None,
@@ -1120,6 +1152,7 @@ def payment_required_v2_dict(
     description: Optional[str] = None,
     extensions: Optional[dict] = None,
     error: Optional[str] = None,
+    tags: Optional[list] = None,
 ) -> dict:
     """The v2 challenge as the wire-shaped dict (camelCase, no nulls), or {}.
 
@@ -1131,7 +1164,7 @@ def payment_required_v2_dict(
     """
     challenge = payment_required_v2(
         price=price, resource_url=resource_url, description=description,
-        extensions=extensions, error=error,
+        extensions=extensions, error=error, tags=tags,
     )
     if challenge is None:
         return {}
@@ -1148,6 +1181,7 @@ def payment_required_header(
     description: Optional[str] = None,
     extensions: Optional[dict] = None,
     error: Optional[str] = None,
+    tags: Optional[list] = None,
 ) -> dict:
     """The x402 **v2** challenge, as the `PAYMENT-REQUIRED` header, or `{}`.
 
@@ -1159,7 +1193,7 @@ def payment_required_header(
     """
     challenge = payment_required_v2(
         price=price, resource_url=resource_url, description=description,
-        extensions=extensions, error=error,
+        extensions=extensions, error=error, tags=tags,
     )
     if challenge is None:
         return {}

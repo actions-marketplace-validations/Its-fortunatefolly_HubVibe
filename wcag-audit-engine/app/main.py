@@ -726,10 +726,22 @@ def _bazaar_extension_for_path(path: Optional[str]) -> dict:
     schema = (
         _MCP_URL_SCHEMA if entry["input"] is _URL_INPUT_SCHEMA else _MCP_HTML_OR_URL_SCHEMA
     )
+    # The output half was the placeholder {"pass": True} on all five audit
+    # routes long after the workers got their real schemas -- the index's
+    # copy of an audit still says so. Same object the MCP tool and the ARD
+    # manifest publish, with an example generated from it.
+    output_schema = _MCP_OUTPUT_SCHEMAS.get(path)
+    output_example = {"pass": True}
+    if output_schema is not None and workers is not None:
+        try:
+            output_example = workers.catalog.contract.example_from_schema(output_schema)
+        except Exception:  # the record must never be why a 402 fails
+            output_example = {"pass": True}
     return x402_payments.bazaar_extension_for_body(
         input_example={"url": "https://example.com"},
         input_schema=schema,
-        output_example={"pass": True},
+        output_example=output_example,
+        output_schema=output_schema,
     )
 
 
@@ -750,6 +762,19 @@ def _route_description(path: Optional[str]) -> str:
             if worker_description:
                 return worker_description
     return "HubVibe site audit"
+
+
+def _route_tags(path: Optional[str]) -> Optional[list]:
+    """This route's Bazaar tags: a worker's catalog tags, or None for an
+    audit (the payments module then uses the audit default).
+
+    Every 402 used to carry the five audit tags, so capability search filed
+    an LLM completion or a Polymarket read under `accessibility`."""
+    if path and workers is not None:
+        worker = workers.catalog.get(_CATALOG_ALIASES.get(path, path))
+        if worker is not None:
+            return list(worker.tags)
+    return None
 
 
 def _payment_required_response(
@@ -933,6 +958,7 @@ def _payment_required_response(
         description=_route_description(path),
         extensions=bazaar or None,
         error=error,
+        tags=_route_tags(path),
     ).items():
         response.headers[name] = value
     response.headers["Cache-Control"] = "no-store"
@@ -3218,12 +3244,18 @@ def _mcp_payment_required(request_id, name: str, price: float, err: JSONResponse
     # the refusal reason when a payment was tried; carry it into the v2
     # object so an MCP payer learns why exactly as an HTTP payer does.
     rest_error = rest_body.get("error") if isinstance(rest_body, dict) else None
+    mcp_tags = None
+    if name in _MCP_WORKER_TOOLS and workers is not None:
+        backing = next((w for w in workers.catalog.CATALOG if w.name == _MCP_WORKER_TOOLS[name]), None)
+        if backing is not None:
+            mcp_tags = list(backing.tags)
     challenge = x402_payments.payment_required_v2_dict(
         price=f"${price:.2f}",
         resource_url=f"{PUBLIC_BASE_URL}/mcp",
         description=tool["description"] if tool is not None else _route_description(None),
         extensions=mcp_bazaar or None,
         error=rest_error if rest_error and rest_error != "payment_required" else None,
+        tags=mcp_tags,
     )
     if challenge:
         # v2 wins the keys both objects carry (x402Version, accepts, error,

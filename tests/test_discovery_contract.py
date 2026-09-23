@@ -282,3 +282,98 @@ def test_no_surface_still_calls_the_node_an_audit_suite(client):
     assert stale not in client.get("/.well-known/agent.json").text
     assert stale not in client.get("/mcp.json").text
     assert stale not in client.get("/.well-known/ard.json").text
+
+
+# --- the Bazaar identity on every 402: one name, this route's own tags ---------
+
+def _v2_resource(response):
+    from x402.http.utils import decode_payment_required_header
+    raw = response.headers.get("payment-required")
+    assert raw, "no PAYMENT-REQUIRED header"
+    return decode_payment_required_header(raw).resource
+
+
+def test_every_402_names_the_service_hubvibe_not_site_audits(client):
+    """The index stamped "HubVibe Site Audits" on an LLM completion. One
+    name for all 43 routes; the description says what the route sells."""
+    for path in ("/audit/wcag", "/work/market/quote", "/work/prediction/events"):
+        body = {"url": "https://example.com"} if path.startswith("/audit") else {}
+        resource = _v2_resource(client.post(path, json=body))
+        assert resource.service_name == "HubVibe", (path, resource.service_name)
+        assert len(resource.service_name) <= 32
+
+
+def test_a_worker_402_carries_its_own_catalog_tags_not_the_audit_tags(client):
+    """Capability search matches on `resource.tags`. A Polymarket read tagged
+    `accessibility` is found by nobody looking for prediction markets."""
+    for worker in W.catalog.live():  # a worker without its provider answers 503, not 402
+        resource = _v2_resource(client.post(worker.path, json={}))
+        expected = [t for t in worker.tags][:5]
+        assert resource.tags == expected, (worker.name, resource.tags)
+        assert "accessibility" not in resource.tags or "accessibility" in worker.tags
+
+
+def test_an_audit_402_keeps_the_audit_tags(client):
+    resource = _v2_resource(client.post("/audit/seo", json={"url": "https://example.com"}))
+    assert resource.tags == ["accessibility", "wcag", "seo", "security", "performance"]
+
+
+def test_every_routes_tags_pass_the_facilitators_validation(client):
+    """<=5 tags, each printable ASCII of <=32 chars: the Bazaar's own rules.
+    An invalid list costs the whole discovery record. Two workers carry more
+    than five tags in the catalog; the challenge sends the first five."""
+    paths = [w.path for w in W.catalog.live()] + [
+        "/audit/wcag", "/audit/seo", "/audit/security", "/audit/performance", "/audit/bundle"]
+    # The catalog rows the test deployment cannot serve are checked statically.
+    for w in W.catalog.CATALOG:
+        assert all(0 < len(t) <= 32 and t.isascii() and t.isprintable() for t in w.tags), w.name
+    for path in paths:
+        body = {"url": "https://example.com"} if path.startswith("/audit") else {}
+        tags = _v2_resource(client.post(path, json=body)).tags
+        assert 1 <= len(tags) <= 5, (path, tags)
+        assert all(0 < len(t) <= 32 and t.isascii() and t.isprintable() for t in tags), (path, tags)
+        assert len(set(tags)) == len(tags), (path, tags)
+
+
+def test_bazaar_tags_helper_trims_and_defaults():
+    x = app_x402()
+    assert x.bazaar_tags(["a", "b", "c", "d", "e", "f"]) == ["a", "b", "c", "d", "e"]
+    assert x.bazaar_tags(["ok", "x" * 33, "ok", "", "caf\u00e9", "fine"]) == ["ok", "fine"]
+    assert x.bazaar_tags(None) == ["accessibility", "wcag", "seo", "security", "performance"]
+    assert x.bazaar_tags([]) == ["accessibility", "wcag", "seo", "security", "performance"]
+
+
+def app_x402():
+    spec = importlib.util.spec_from_file_location(
+        "wcag_audit_x402_tags", REPO_ROOT / "wcag-audit-engine" / "app" / "x402_payments.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_mcp_paywall_for_the_probability_tool_carries_the_stats_tags(client, app_module):
+    """The MCP paywall is the other place a v2 challenge is built. The
+    worker-backed tool names its worker's capability, not accessibility."""
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "hubvibe_predictive_probability_engine",
+                          "arguments": {"points": [[1, 2], [2, 4], [3, 6]]}}}
+    response = client.post("/mcp", json=payload)
+    text = response.text
+    assert "statistics" in text and "regression" in text, text[:400]
+    assert '"serviceName": "HubVibe"' in text or '"serviceName":"HubVibe"' in text, text[:400]
+
+
+def test_an_audit_402s_bazaar_record_shows_the_real_audit_response(client, app_module):
+    """The audits' index record advertised the placeholder {"pass": true}
+    long after the workers got real schemas. Now it carries the same output
+    schema the MCP tool and ARD publish, with an example that validates."""
+    from x402.http.utils import decode_payment_required_header
+    for path, schema in app_module._MCP_OUTPUT_SCHEMAS.items():
+        raw = client.post(path, json={"url": "https://example.com"}).headers.get("payment-required")
+        challenge = decode_payment_required_header(raw)
+        info = challenge.extensions["bazaar"]["info"]["output"]
+        example = info["example"]
+        assert example != {"pass": True}, path
+        _validator(schema).validate(example)
+        recorded = challenge.extensions["bazaar"]["schema"]["properties"]["output"]["properties"]
+        assert recorded["example"].get("required") or recorded["example"].get("properties"), path
