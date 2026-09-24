@@ -115,6 +115,9 @@ def test_mcp_json_served_and_matches_repo_manifest(monkeypatch):
     # from it, fails here.
     expected = {"audit_wcag", "audit_seo", "audit_security", "audit_performance", "audit_bundle",
                 "hubvibe_predictive_probability_engine"}
+    # Every other live bee is a tool under its own name.
+    expected |= {"hubvibe_" + w.name.replace(".", "_") for w in module.workers.catalog.live()
+                 if w.name != "stats.probability"}
     assert tool_names == expected
 
 
@@ -2327,6 +2330,9 @@ def test_mcp_tools_list_is_free_and_complete(monkeypatch):
         "audit_wcag", "audit_seo", "audit_security", "audit_performance", "audit_bundle",
         "hubvibe_predictive_probability_engine",
     }
+    # Every other live bee is a tool under its own name.
+    expected |= {"hubvibe_" + w.name.replace(".", "_") for w in module.workers.catalog.live()
+                 if w.name != "stats.probability"}
     assert names == expected
     for t in tools:
         assert t["inputSchema"]["type"] == "object"
@@ -2354,6 +2360,12 @@ def test_mcp_tool_schemas_never_admit_an_empty_call(monkeypatch):
 
     for t in tools:
         schema = t["inputSchema"]
+        worker = module._mcp_worker_tools().get(t["name"])
+        if worker is not None and not worker.input_schema.get("required") \
+                and not worker.input_schema.get("oneOf"):
+            # A bee whose inputs are all optional: {} is a real call
+            # (chain.network was paid and delivered with exactly that).
+            continue
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate({}, schema)
         # And the arguments the route genuinely accepts must stay legal --

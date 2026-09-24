@@ -44,6 +44,10 @@ ALLOWED = {
     # public pool identifier, not a secret.
     # .claude/skills/base-mcp/plugins/bankr.md
     "0x2fee469c920ad9cd8d7fed1510c6034531e0f9fb7c94dbeea35623a358b7580f",
+    # chain.transaction's placeholder tx hash in its output-schema example,
+    # written out in full in the static MCP manifest -- not a key.
+    # wcag-audit-engine/app/static/mcp.json
+    "0x" + "ab" * 32,
 }
 
 # Identifiers that are not credentials but should not sit in a public repo.

@@ -25,7 +25,8 @@ Machine-readable discovery:
   params._meta["x402/payment"] (the x402.mcp client does this for you) and
   the settlement receipt comes back in the result's
   _meta["x402/payment-response"]. X-PAYMENT / PAYMENT-SIGNATURE / X-API-Key
-  headers on the POST work as well.
+  headers on the POST work as well. Every audit and every /work worker is a
+  tool: /work/research/brief is hubvibe_research_brief, and so on.
 - /mcp.json -- static MCP tool definitions with their httpEndpoint
 - /docs -- interactive API reference
 

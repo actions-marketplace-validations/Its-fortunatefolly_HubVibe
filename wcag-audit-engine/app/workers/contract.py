@@ -310,14 +310,14 @@ OUTPUT_SCHEMAS = {
     }, ["url", "status", "bytes", "truncated", "headers"]),
 
     "search.web": _obj({
-        "query": _s("The query searched.", "x402 payment protocol"),
+        "query": _s("The query searched.", "HTTP 402 Payment Required"),
         "answer": _s("Grounded answer with the sources it drew on.",
-                     "x402 is an HTTP-native payment protocol that uses the 402 status code..."),
-        "sources": _arr(_obj({"url": _s("Source URL.", "https://www.x402.org/"),
-                              "title": _s("Source title.", "x402", nullable=True)}, ["url"]),
+                     "HTTP 402 Payment Required is a status code reserved for payments..."),
+        "sources": _arr(_obj({"url": _s("Source URL.", "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/402"),
+                              "title": _s("Source title.", "402 Payment Required - HTTP | MDN", nullable=True)}, ["url"]),
                         "Web sources the answer is grounded in."),
-        "search_queries_used": _arr(_s("A query the grounding step issued.", "x402 protocol"),
-                                    "Search queries the grounding step actually ran.", ["x402 protocol"]),
+        "search_queries_used": _arr(_s("A query the grounding step issued.", "HTTP 402 status code"),
+                                    "Search queries the grounding step actually ran.", ["HTTP 402 status code"]),
         "model": _MODEL,
     }, ["query", "answer", "sources", "search_queries_used", "model"]),
 
@@ -635,9 +635,9 @@ OUTPUT_SCHEMAS = {
     }, ["product_id", "spot", "prediction_markets", "analysis", "model", "disclaimer"]),
 
     "research.web": _obj({
-        "question": _s("The question researched.", "What is the x402 payment protocol?"),
+        "question": _s("The question researched.", "What is the HTTP 402 status code for?"),
         "answer": _s("Cited answer; every claim carries [n].",
-                     "x402 is an HTTP-native payment standard built on the 402 status code [1]..."),
+                     "HTTP 402 Payment Required is reserved for payments; machine-payment protocols use it to quote a price [1]..."),
         "sources": _arr(_CITED_SOURCE, "Sources read, numbered as cited."),
         "partial": _arr(_UNREAD_SOURCE, "Sources found but not read, with the reason.", []),
         "model": _MODEL,

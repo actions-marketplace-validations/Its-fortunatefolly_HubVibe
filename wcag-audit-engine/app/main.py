@@ -2751,6 +2751,10 @@ def _mcp_tools() -> list:
 # here (same fail-closed rule as /work).
 _MCP_WORKER_TOOLS = {
     "hubvibe_predictive_probability_engine": "stats.probability",
+    # Every other bee under its own name: research.brief -> hubvibe_research_brief.
+    **({"hubvibe_" + w.name.replace(".", "_"): w.name
+        for w in workers.catalog.CATALOG if w.name != "stats.probability"}
+       if workers is not None else {}),
 }
 
 
@@ -2972,9 +2976,10 @@ async def mcp_streamable_http(
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "hubvibe-site-audit", "version": SERVICE_VERSION},
                 "instructions": (
-                    "Rule-based site compliance audits and a deterministic "
-                    "statistics engine. Every tool costs money and returns a "
-                    "deterministic result, never an LLM's opinion. Calls "
+                    "Rule-based site compliance audits, a deterministic "
+                    "statistics engine, and HubVibe's worker network (search, "
+                    "research, LLM, data, chain, market, maps, media). Every "
+                    "tool costs money. Calls "
                     "must be paid for; this deployment currently settles: "
                     f"{', '.join(_payment_methods_live()) or 'no rail is configured'}"
                     f" -- see {PUBLIC_BASE_URL}/.well-known/agent.json and the 402 "
