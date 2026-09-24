@@ -27,6 +27,13 @@ Machine-readable discovery:
   _meta["x402/payment-response"]. X-PAYMENT / PAYMENT-SIGNATURE / X-API-Key
   headers on the POST work as well. Every audit and every /work worker is a
   tool: /work/research/brief is hubvibe_research_brief, and so on.
+- /.well-known/agent-card.json -- A2A Agent Card: every MCP tool is a
+  skill, JSON-RPC at /a2a in A2A 1.0 and 0.3, x402 payments extension
+- /a2a -- A2A JSON-RPC (SendMessage, GetTask, CancelTask). Name a skill in
+  a data part {"skill": "hubvibe_research_brief", "arguments": {...}}; an
+  unpaid call returns the task in input-required with the price in
+  metadata x402.payment.required; send the signed PaymentPayload in the
+  next message's metadata x402.payment.payload with the same taskId.
 - /mcp.json -- static MCP tool definitions with their httpEndpoint
 - /docs -- interactive API reference
 

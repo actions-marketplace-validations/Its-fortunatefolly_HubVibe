@@ -232,6 +232,9 @@ def test_ard_lists_every_audit_every_live_worker_and_the_cards(client):
     assert by_id["urn:air:audit.example.test:mcp:site-audits"]["url"] == "https://audit.example.test/mcp.json"
     assert by_id["urn:air:audit.example.test:mcp:site-audits"]["type"] == "application/mcp-server-card+json"
     assert by_id["urn:air:audit.example.test:api:openapi"]["url"] == "https://audit.example.test/openapi.json"
+    a2a_card = by_id["urn:air:audit.example.test:agent:a2a"]
+    assert a2a_card["url"] == "https://audit.example.test/.well-known/agent-card.json"
+    assert a2a_card["type"] == "application/a2a-agent-card+json"
     assert by_id["urn:air:audit.example.test:node:hubvibe"]["url"] == "https://audit.example.test/.well-known/agent.json"
 
 

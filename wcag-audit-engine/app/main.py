@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 try:
-    from . import (ard, audits, billing, browser_pool, mpp_payments,
+    from . import (a2a, ard, audits, billing, browser_pool, mpp_payments,
                    solana_hash_verifier, x402_payments)
 except ImportError:
     # Loaded directly by file path (e.g. by tooling/tests) rather than as
@@ -55,6 +55,7 @@ except ImportError:
     x402_payments = _load_sibling_module("x402_payments")  # type: ignore
     ard = _load_sibling_module("ard")  # type: ignore
     solana_hash_verifier = _load_sibling_module("solana_hash_verifier")  # type: ignore
+    a2a = _load_sibling_module("a2a")  # type: ignore
 
 # The worker network: additional machine-payable capabilities that run BESIDE
 # the audits. Kept in its own import block so the audit imports above are
@@ -98,7 +99,7 @@ PUBLIC_BASE_URL = os.environ.get(
 # reading a version that names the wrong build. Kept in step with
 # server.json (the official registry's copy) by a test, since that file is
 # outside the container's build context and cannot be read at runtime.
-SERVICE_VERSION = "1.4.2"
+SERVICE_VERSION = "1.5.0"
 
 # The revenue counter in the log -- "x402 SETTLED ..." -- is an INFO line.
 # Python's root logger defaults to WARNING and uvicorn configures only its
@@ -2236,6 +2237,8 @@ async def agent_manifest(request: Request):
             "ard": f"{base}/.well-known/ard.json",
             "mcp_endpoint": f"{base}/mcp",
             "mcp": f"{base}/mcp.json",
+            "a2a_agent_card": f"{base}/.well-known/agent-card.json",
+            "a2a_endpoint": f"{base}/a2a",
             "llms_txt": f"{base}/llms.txt",
             "docs": f"{base}/docs",
         },
@@ -2996,20 +2999,152 @@ async def mcp_streamable_http(
         return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": _mcp_tools()}}
 
     if method == "tools/call":
-        from starlette.concurrency import run_in_threadpool
-
-        if (params or {}).get("name") in _MCP_WORKER_TOOLS:
-            # A worker job runs on the event loop with its own limiter, like
-            # its HTTP route -- never in the audit thread pool, whose two
-            # slots on the box are what the browser audits wait on.
-            return await _mcp_worker_tool_call(
-                payload, request, x_api_key, x_payment, authorization
-            )
-        return await run_in_threadpool(
-            _mcp_tools_call, payload, request, x_api_key, x_payment, authorization
-        )
+        return await _mcp_dispatch_tool_call(payload, request, x_api_key, x_payment, authorization)
 
     return _jsonrpc_error(request_id, -32601, f"Method not found: {method}")
+
+
+async def _mcp_dispatch_tool_call(payload, request, x_api_key, x_payment, authorization):
+    """tools/call, for /mcp and for /a2a's SendMessage alike."""
+    from starlette.concurrency import run_in_threadpool
+
+    if ((payload.get("params") or {}).get("name")) in _MCP_WORKER_TOOLS:
+        # A worker job runs on the event loop with its own limiter, like
+        # its HTTP route -- never in the audit thread pool, whose two
+        # slots on the box are what the browser audits wait on.
+        return await _mcp_worker_tool_call(
+            payload, request, x_api_key, x_payment, authorization
+        )
+    return await run_in_threadpool(
+        _mcp_tools_call, payload, request, x_api_key, x_payment, authorization
+    )
+
+
+# --- A2A: the Agent Card and the JSON-RPC endpoint --------------------------
+# Every A2A skill is an MCP tool: the card lists _mcp_tools(), and a
+# SendMessage runs through _mcp_dispatch_tool_call, so both transports sell
+# the same thing at the same price through the one gate. Shaping lives in
+# a2a.py.
+_A2A_TASKS = a2a.TaskStore()
+
+
+def _a2a_tags(tool_name: str) -> list:
+    worker = _mcp_worker_tools().get(tool_name)
+    path = worker.path if worker is not None else "/audit/" + tool_name.removeprefix("audit_")
+    return x402_payments.bazaar_tags(_route_tags(path))
+
+
+def _a2a_card() -> dict:
+    return a2a.build_card(
+        base_url=PUBLIC_BASE_URL, name="HubVibe",
+        description=(
+            f"{SERVICE_TITLE}. Rule-based site audits (accessibility, SEO, security, "
+            "performance) and a worker network (search, research, LLM, data, chain, "
+            "market, maps, media, statistics), each skill paid per call over x402. "
+            "Name a skill in a data part: {\"skill\": <id>, \"arguments\": {...}}."
+        ),
+        version=SERVICE_VERSION, tools=_mcp_tools(),
+        tags_for=_a2a_tags, example_for=_mcp_tool_example,
+    )
+
+
+@app.get("/.well-known/agent-card.json", tags=["discovery"])
+async def a2a_agent_card():
+    """The A2A Agent Card (A2A 1.0.1, section 8), with the caching headers
+    section 8.6.1 asks for."""
+    import hashlib
+
+    card = _a2a_card()
+    etag = hashlib.sha256(json.dumps(card, sort_keys=True).encode()).hexdigest()[:32]
+    return JSONResponse(content=card, headers={"Cache-Control": "public, max-age=300",
+                                               "ETag": f'"{etag}"'})
+
+
+@app.post("/a2a", tags=["discovery"])
+async def a2a_jsonrpc(
+    payload: Any = Body(...),
+    request: Request = None,
+    x_api_key: Optional[str] = Header(None),
+    x_payment: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    """A2A JSON-RPC: SendMessage, GetTask, CancelTask (and their 0.3 names)."""
+    requested = request.headers.get("A2A-Version") or request.query_params.get("A2A-Version")
+    version = a2a.negotiate_version(requested)
+    request_id = payload.get("id") if isinstance(payload, dict) else None
+    if version is None:
+        return a2a.error(request_id, -32009,
+                         f"A2A version {requested!r} is not supported; use 1.0 or 0.3.",
+                         "VERSION_NOT_SUPPORTED")
+    if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+        return a2a.error(request_id, -32600, "Request payload validation error")
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    op, code = a2a.operation(payload.get("method"))
+    if op is None:
+        return a2a.error(request_id, code, "This operation is not supported by this agent."
+                         if code != -32601 else "Method not found")
+
+    headers = {}
+    wanted = ",".join(filter(None, [request.headers.get("A2A-Extensions"),
+                                    request.headers.get("X-A2A-Extensions")]))
+    if a2a.X402_EXTENSION_URI in wanted:
+        headers["A2A-Extensions"] = a2a.X402_EXTENSION_URI
+
+    if op in ("get", "cancel"):
+        task = _A2A_TASKS.get(params.get("id"))
+        if task is None:
+            return a2a.error(request_id, -32001, "Task not found", "TASK_NOT_FOUND")
+        if op == "cancel":
+            if task["state"] != "input-required":
+                return a2a.error(request_id, -32002, "Task cannot be canceled",
+                                 "TASK_NOT_CANCELABLE")
+            task = {**task, "state": "canceled", "text": "Canceled. Nothing was charged.",
+                    "metadata": {}}
+            _A2A_TASKS.put(task)
+        return JSONResponse({"jsonrpc": "2.0", "id": request_id,
+                             "result": a2a.task_json(task, version)}, headers=headers)
+
+    message = params.get("message")
+    if not isinstance(message, dict) or not isinstance(message.get("parts"), list) \
+            or not message["parts"]:
+        return a2a.error(request_id, -32602, "Invalid parameters: message.parts is required")
+    asked = a2a.parse_message(message)
+    earlier = _A2A_TASKS.get(asked["task_id"]) if asked["task_id"] else None
+    if asked["task_id"] and earlier is None and not asked["skill"]:
+        return a2a.error(request_id, -32001, "Task not found", "TASK_NOT_FOUND")
+    skill = asked["skill"] or (earlier or {}).get("skill")
+    arguments = asked["arguments"] if asked["arguments"] is not None \
+        else (earlier or {}).get("arguments") or {}
+    if not skill:
+        return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": a2a.reply(
+            "Name a skill: send a data part {\"skill\": \"<id>\", \"arguments\": {...}}. "
+            f"The skills and their prices are in {PUBLIC_BASE_URL}/.well-known/agent-card.json.",
+            version)}, headers=headers)
+    by_worker_name = {w.name: n for n, w in _mcp_worker_tools().items()}
+    tool = by_worker_name.get(skill, skill)
+    if tool not in {t["name"] for t in _mcp_tools()}:
+        return a2a.error(request_id, -32602, f"Unknown skill {skill!r}; see the Agent Card.")
+
+    call = {"jsonrpc": "2.0", "id": request_id,
+            "params": {"name": tool, "arguments": arguments,
+                       **({"_meta": {x402_payments.MCP_PAYMENT_META_KEY: asked["payment"]}}
+                          if asked["payment"] else {})}}
+    answered = await _mcp_dispatch_tool_call(call, request, x_api_key, x_payment, authorization)
+    if isinstance(answered, Response):
+        headers.update({k: v for k, v in answered.headers.items()
+                        if k.lower() in ("payment-response", "x-payment-response", "retry-after")})
+        answered = json.loads(bytes(answered.body).decode())
+    if "error" in answered:
+        return JSONResponse({"jsonrpc": "2.0", "id": request_id, "error": answered["error"]},
+                            headers=headers)
+    task = a2a.new_task(asked["task_id"], asked["context_id"] or (earlier or {}).get("contextId"),
+                        tool, arguments,
+                        a2a.outcome(answered["result"], paid=bool(
+                            asked["payment"] or x_payment
+                            or request.headers.get("payment-signature"))))
+    _A2A_TASKS.put(task)
+    return JSONResponse({"jsonrpc": "2.0", "id": request_id,
+                         "result": a2a.send_result(task, version)}, headers=headers)
 
 
 def _mcp_tools_call(

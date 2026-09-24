@@ -386,11 +386,11 @@ header on a 402 for that method) and stays inert:
 - `integrations/github_action.yml` — a copy-paste GitHub Actions workflow
   that runs `/audit/bundle` as a CI/CD gate and fails the build on either a
   failed audit or a failed/unauthenticated request.
-- `app/static/mcp.json`, served live at `/mcp.json` — tool definitions for
-  all five routes in MCP's `{name, description, inputSchema}` shape, with a
-  non-standard `httpEndpoint` extension mapping each onto its actual route
-  and price, since this is a plain REST API, not a live MCP stdio/SSE
-  server. The same schema is also served live at `/.well-known/agent.json`.
+- `app/static/mcp.json`, served live at `/mcp.json` — the tool definitions
+  the live MCP endpoint `/mcp` answers `tools/list` with (every audit and
+  every worker), each with a non-standard `httpEndpoint` extension mapping
+  it onto its REST route and price. The same tools are A2A skills in
+  `/.well-known/agent-card.json`, served over JSON-RPC at `/a2a`.
 
 ## Local development
 

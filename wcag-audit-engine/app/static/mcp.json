@@ -2,7 +2,7 @@
   "mcpVersion": "2025-06-18",
   "name": "hubvibe-site-audit",
   "description": "HubVibe: 38 Machine-Payable Dev Utilities and WCAG Audits. This MCP server exposes the five deterministic site audits (accessibility via axe-core, SEO, security headers, performance, and the bundle) and the deterministic predictive probability engine (linear regression, normal distribution modeling and p-value validation over inline points or a BigQuery table) as tools. The 38 /work utilities -- LLM inference, web search and extraction, Base chain reads, market and prediction-market data, BigQuery analysis and forecasting, regression and probability statistics, image/speech/video generation, sandboxed Python, maps, cited research and verification -- are tools here too (research.brief is hubvibe_research_brief) and plain HTTP routes, priced per call and documented with request and response schemas in /openapi.json, /.well-known/agent.json and /.well-known/ard.json.",
-  "version": "1.4.2",
+  "version": "1.5.0",
   "websiteUrl": "https://hubvibe-io.com/",
   "documentationUrl": "https://hubvibe-io.com/.well-known/agent.json",
   "repository": {

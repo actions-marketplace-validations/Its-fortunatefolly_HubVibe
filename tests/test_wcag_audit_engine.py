@@ -1744,6 +1744,15 @@ def test_manifest_points_at_reachable_discovery_documents(monkeypatch):
                 f"{name} -> {path} does not speak MCP"
             )
             continue
+        if name == "a2a_endpoint":
+            # A2A JSON-RPC: POST-only too. GetTask for an unknown id is the
+            # spec's TaskNotFoundError, which proves the endpoint speaks A2A.
+            r = client.post(path, headers={"A2A-Version": "1.0"}, json={
+                "jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": "x"}})
+            assert r.status_code == 200 and r.json()["error"]["code"] == -32001, (
+                f"{name} -> {path} does not speak A2A"
+            )
+            continue
         assert client.get(path).status_code == 200, f"{name} -> {path} is not reachable"
 
 

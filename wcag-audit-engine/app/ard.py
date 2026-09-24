@@ -25,6 +25,7 @@ CONTEXT = "https://agenticresourcediscovery.org/context/v1"
 # the OpenAPI Initiative's media type and a vendor type for our route
 # descriptor (the `data` of a route entry is the descriptor itself).
 TYPE_MCP_SERVER_CARD = "application/mcp-server-card+json"
+TYPE_A2A_AGENT_CARD = "application/a2a-agent-card+json"
 TYPE_OPENAPI = "application/openapi+json"
 TYPE_AGENT_MANIFEST = "application/json"
 TYPE_HUBVIBE_ROUTE = "application/vnd.hubvibe.route+json"
@@ -123,9 +124,9 @@ def build_manifest(
             "url": f"{base}/mcp.json",
             "description": (
                 "MCP server (Streamable HTTP) exposing the five deterministic "
-                "site audits as tools: WCAG 2.1 via axe-core, SEO, security "
-                "headers, performance, and the bundle. initialize and tools/list "
-                "are free; tools/call is billed per call."),
+                "site audits (WCAG 2.1 via axe-core, SEO, security headers, "
+                "performance, and the bundle) and every worker as tools. "
+                "initialize and tools/list are free; tools/call is billed per call."),
             "capabilities": list(mcp_tool_names),
             "representativeQueries": [
                 "MCP server with a website accessibility audit tool",
@@ -134,6 +135,25 @@ def build_manifest(
             ],
             "tags": ["mcp", "wcag", "seo", "security-headers", "performance"],
             "metadata": {"endpoint": f"{base}/mcp", "protocol": "streamable-http"},
+            **common,
+        },
+        {
+            "identifier": _identifier(publisher, "agent", "a2a"),
+            "displayName": "HubVibe (A2A agent)",
+            "type": TYPE_A2A_AGENT_CARD,
+            "url": f"{base}/.well-known/agent-card.json",
+            "description": (
+                "A2A Agent Card: every MCP tool is a skill, served over JSON-RPC "
+                "at /a2a in A2A 1.0 and 0.3, paid per call with the a2a-x402 "
+                "extension or the usual HTTP payment headers."),
+            "capabilities": list(mcp_tool_names),
+            "representativeQueries": [
+                "A2A agent that sells site audits and dev utilities per call",
+                "agent-to-agent API paid with x402 on Base or Solana",
+                "A2A skill for WCAG, SEO, web research or LLM calls",
+            ],
+            "tags": ["a2a", "x402", "pay-per-call", "agents"],
+            "metadata": {"endpoint": f"{base}/a2a", "protocol": "jsonrpc"},
             **common,
         },
         {
