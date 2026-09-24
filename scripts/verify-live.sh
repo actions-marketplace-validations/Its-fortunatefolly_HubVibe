@@ -393,7 +393,10 @@ for tool in tools:
     if not tool.get("outputSchema") or not tool.get("annotations"):
         sys.exit(1)
     schema = tool.get("inputSchema") or {}
-    if not (schema.get("required") or schema.get("anyOf") or schema.get("oneOf")):
+    # Audits take url or html, so their schema must say so. A bee whose
+    # inputs are all optional (chain.network) has no constraint to declare.
+    if tool["name"].startswith("audit_") and not (
+            schema.get("required") or schema.get("anyOf") or schema.get("oneOf")):
         sys.exit(1)
 sys.exit(0)
 ' 2>/dev/null; then
